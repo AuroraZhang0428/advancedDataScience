@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
+from agent.nodes.enrich_candidates import enrich_candidates_node
 from agent.nodes.evaluate_results import evaluate_results_node, evaluate_results_route
 from agent.nodes.explain import explain_node
 from agent.nodes.filter_listings import filter_listings_node
@@ -23,6 +24,7 @@ def build_graph():
     builder.add_node("parse_preferences", parse_preferences_node)
     builder.add_node("filter_listings", filter_listings_node)
     builder.add_node("score_rank", score_rank_node)
+    builder.add_node("enrich_candidates", enrich_candidates_node)
     builder.add_node("evaluate_results", evaluate_results_node)
     builder.add_node("relax_or_ask", relax_or_ask_node)
     builder.add_node("explain", explain_node)
@@ -31,7 +33,8 @@ def build_graph():
     builder.add_edge("load_data", "parse_preferences")
     builder.add_edge("parse_preferences", "filter_listings")
     builder.add_edge("filter_listings", "score_rank")
-    builder.add_edge("score_rank", "evaluate_results")
+    builder.add_edge("score_rank", "enrich_candidates")
+    builder.add_edge("enrich_candidates", "evaluate_results")
 
     builder.add_conditional_edges(
         "evaluate_results",

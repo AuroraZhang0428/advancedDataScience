@@ -18,12 +18,30 @@ DEFAULT_QUERY = (
 def _format_listing(listing: dict[str, Any]) -> str:
     """Create a compact display string for one recommendation."""
 
+    host_name = listing.get("host_name") or listing.get("raw", {}).get("host_name") or "Unknown host"
     neighborhood = listing.get("neighborhood") or listing.get("neighborhood_group") or "Unknown area"
     price = listing.get("price")
     price_text = f"${float(price):,.0f}" if price is not None else "price unavailable"
+    location_context = dict(listing.get("location_context") or {})
+    context_suffix = ""
+    transit_parts: list[str] = []
+    if location_context.get("nearby_subway_count"):
+        transit_parts.append(f"subway={int(location_context['nearby_subway_count'])}")
+    if location_context.get("nearby_train_count"):
+        transit_parts.append(f"train={int(location_context['nearby_train_count'])}")
+    if location_context.get("nearby_bus_count"):
+        transit_parts.append(f"bus={int(location_context['nearby_bus_count'])}")
+    if location_context.get("nearby_transit_hub_count"):
+        transit_parts.append(f"hubs={int(location_context['nearby_transit_hub_count'])}")
+    if location_context.get("average_commute_minutes") is not None:
+        context_suffix = f" | commute~{float(location_context['average_commute_minutes']):.0f} min"
+    elif transit_parts:
+        context_suffix = " | " + ", ".join(transit_parts)
+    elif location_context.get("nearby_transit_count") is not None:
+        context_suffix = f" | transit={int(location_context['nearby_transit_count'])}"
     return (
         f"- {listing.get('title', 'Untitled')} | score={float(listing.get('score', 0.0)):.2f} | "
-        f"{neighborhood} | {price_text}"
+        f"host={host_name} | {neighborhood} | {price_text}{context_suffix}"
     )
 
 
@@ -33,6 +51,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the apartment leasing agent demo.")
     parser.add_argument("--query", default=DEFAULT_QUERY, help="User apartment search query.")
     parser.add_argument("--api-key", default=None, help="OpenAI API Key for GenAI features.")
+    parser.add_argument(
+        "--google-maps-api-key",
+        default=None,
+        help="Google Maps Platform API key for live location enrichment.",
+    )
     parser.add_argument(
         "--dataset",
         default=str(DEFAULT_CONFIG.dataset_path),
@@ -48,6 +71,15 @@ def main() -> None:
         key = getpass.getpass("Enter your OpenAI API key for GenAI parsing & explanations (or press Enter to skip): ")
         if key.strip():
             os.environ["OPENAI_API_KEY"] = key.strip()
+    if args.google_maps_api_key:
+        os.environ["GOOGLE_MAPS_API_KEY"] = args.google_maps_api_key
+    elif "GOOGLE_MAPS_API_KEY" not in os.environ:
+        import getpass
+        maps_key = getpass.getpass(
+            "Enter your Google Maps Platform API key for live location enrichment (or press Enter to skip): "
+        )
+        if maps_key.strip():
+            os.environ["GOOGLE_MAPS_API_KEY"] = maps_key.strip()
 
     graph = build_graph()
     
@@ -88,6 +120,13 @@ def main() -> None:
     else:
         for entry in history:
             print(entry)
+
+    print("\n=== Google Maps Enrichment ===")
+    diagnostics = result.get("google_enrichment_diagnostics", {})
+    if not diagnostics:
+        print("No Google Maps diagnostics were recorded.")
+    else:
+        print(diagnostics)
 
     print("\n=== Need User Input ===")
     print(result.get("need_user_input", False))

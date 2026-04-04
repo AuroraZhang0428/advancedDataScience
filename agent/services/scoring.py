@@ -8,6 +8,11 @@ from typing import Any
 
 from agent.config import DEFAULT_CONFIG, ScoringWeights
 from agent.models import ScoreBreakdown
+from agent.services.neighborhoods import (
+    compute_commute_score,
+    compute_food_score,
+    compute_transit_score,
+)
 
 try:
     from pydantic import BaseModel, Field
@@ -246,34 +251,54 @@ def compute_purpose_alignment(listing: dict[str, Any], soft_preferences: dict[st
 
 
 def compute_neighborhood_score(listing: dict[str, Any], soft_preferences: dict[str, Any]) -> float:
-    """Score location fit against preferred neighborhoods or areas."""
+    """Score location fit against neighborhood, commute, transit, and food preferences."""
 
     preferences = [str(item).lower() for item in soft_preferences.get("preferred_neighborhoods", [])]
-    if not preferences:
-        return 1.0
+    explicit_neighborhood_score: float | None = None
 
     neighborhood = str(listing.get("neighborhood") or "").lower()
     neighborhood_group = str(listing.get("neighborhood_group") or "").lower()
-    best = 0.20
+    if preferences:
+        best = 0.20
+        for preferred in preferences:
+            if preferred == neighborhood:
+                best = max(best, 1.0)
+                continue
+            if preferred in neighborhood or neighborhood in preferred:
+                best = max(best, 0.90)
+                continue
+            if preferred == neighborhood_group or preferred in neighborhood_group:
+                best = max(best, 0.75)
+                continue
 
-    for preferred in preferences:
-        if preferred == neighborhood:
-            best = max(best, 1.0)
-            continue
-        if preferred in neighborhood or neighborhood in preferred:
-            best = max(best, 0.90)
-            continue
-        if preferred == neighborhood_group or preferred in neighborhood_group:
-            best = max(best, 0.75)
-            continue
+            similarity = SequenceMatcher(None, preferred, neighborhood).ratio()
+            best = max(best, similarity * 0.70)
 
-        similarity = SequenceMatcher(None, preferred, neighborhood).ratio()
-        best = max(best, similarity * 0.70)
+        if soft_preferences.get("expanded_neighborhood_search"):
+            best = max(best, 0.65)
+        explicit_neighborhood_score = _clip(best)
 
-    if soft_preferences.get("expanded_neighborhood_search"):
-        best = max(best, 0.65)
+    component_scores: list[tuple[float, float]] = []
+    if explicit_neighborhood_score is not None:
+        component_scores.append((explicit_neighborhood_score, 0.40))
 
-    return _clip(best)
+    commute_destinations = [str(item) for item in soft_preferences.get("commute_destinations", []) if str(item).strip()]
+    commute_score = compute_commute_score(listing, commute_destinations)
+    if commute_score is not None:
+        component_scores.append((commute_score, 0.30))
+
+    if soft_preferences.get("transit_priority"):
+        component_scores.append((compute_transit_score(listing), 0.15))
+
+    if soft_preferences.get("food_scene_priority"):
+        component_scores.append((compute_food_score(listing), 0.15))
+
+    if not component_scores:
+        return 1.0
+
+    total_weight = sum(weight for _, weight in component_scores)
+    weighted_score = sum(score * weight for score, weight in component_scores) / total_weight
+    return _clip(weighted_score)
 
 
 def compute_price_score(

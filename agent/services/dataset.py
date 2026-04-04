@@ -237,6 +237,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         listing = Listing(
             id=str(row.get("id") or ""),
             title=title,
+            host_name=str(row.get("host_name") or "").strip() or None,
             neighborhood=str(row.get("neighborhood") or "").strip() or None,
             neighborhood_group=str(row.get("neighborhood_group") or "").strip() or None,
             price=_coerce_numeric(row.get("price")),

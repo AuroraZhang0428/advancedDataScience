@@ -32,7 +32,23 @@ if HAS_LLM:
         )
         preferred_neighborhoods: list[str] = Field(default_factory=list, description="Desired neighborhoods or areas")
         desired_amenities: list[str] = Field(default_factory=list, description="List of desired amenities, e.g. wifi, workspace, gym, laundry, parking")
+        commute_destinations: list[str] = Field(
+            default_factory=list,
+            description="Workplaces, campuses, or commute anchors the user needs frequent access to.",
+        )
         remote_work: bool = Field(default=False, description="Whether the user wants remote work suitability")
+        transit_priority: bool = Field(
+            default=False,
+            description="Whether nearby public transportation or easy commuting is important.",
+        )
+        preferred_transit_modes: list[Literal["subway", "train", "bus"]] = Field(
+            default_factory=list,
+            description="Specific transit modes the user prefers, such as subway, train, or bus.",
+        )
+        food_scene_priority: bool = Field(
+            default=False,
+            description="Whether strong restaurant, cafe, grocery, or food access matters.",
+        )
         quiet_preference: bool = Field(default=False, description="Whether the user prefers a quiet place")
         review_min_rating: float | None = Field(default=None, description="Minimum review rating mentioned")
         room_type: str | None = Field(default=None, description="Room type: 'Entire home/apt' or 'Private room'")
@@ -186,6 +202,39 @@ def _extract_preferred_neighborhoods(query: str) -> list[str]:
     return neighborhoods
 
 
+def _extract_commute_destinations(query: str) -> list[str]:
+    """Extract work or school anchors from natural language."""
+
+    patterns = [
+        r"(?:work|office|job|commute|travel)\s+(?:in|to|near|around)\s+(?P<place>[^.;,]+)",
+        r"(?:student|study|studying|classes)\s+(?:at|in|near)\s+(?P<place>[^.;,]+)",
+        r"(?:go to school|attend school)\s+(?:at|in|near)\s+(?P<place>[^.;,]+)",
+    ]
+    stop_markers = [" with ", " and ", " but ", " because ", " for ", " so "]
+    destinations: list[str] = []
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, query, flags=re.IGNORECASE):
+            raw_place = match.group("place").strip(" .")
+            for marker in stop_markers:
+                marker_index = raw_place.lower().find(marker)
+                if marker_index != -1:
+                    raw_place = raw_place[:marker_index]
+                    break
+            cleaned = re.sub(r"^(the|my)\s+", "", raw_place.strip(), flags=re.IGNORECASE)
+            if cleaned:
+                destinations.append(cleaned.title())
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for destination in destinations:
+        normalized = destination.lower()
+        if normalized not in seen:
+            seen.add(normalized)
+            deduped.append(destination)
+    return deduped
+
+
 def _extract_amenities(query: str) -> list[str]:
     """Extract requested amenities from the query."""
 
@@ -208,6 +257,62 @@ def _extract_remote_work_preference(query: str) -> bool:
         "good internet",
         "strong wifi",
         "quiet place to work",
+    ]
+    lowered = query.lower()
+    return any(signal in lowered for signal in signals)
+
+
+def _extract_transit_priority(query: str, commute_destinations: list[str]) -> bool:
+    """Detect whether transit or easy commuting matters to the user."""
+
+    signals = [
+        "subway",
+        "train",
+        "bus",
+        "public transit",
+        "transportation",
+        "easy commute",
+        "close to transit",
+        "near transit",
+        "near the train",
+    ]
+    lowered = query.lower()
+    return bool(commute_destinations) or any(signal in lowered for signal in signals)
+
+
+def _extract_preferred_transit_modes(query: str) -> list[str]:
+    """Extract specific transit modes the user cares about."""
+
+    lowered = query.lower()
+    preferred_modes: list[str] = []
+
+    if any(signal in lowered for signal in ["subway", "subway station", "metro", "underground"]):
+        preferred_modes.append("subway")
+    if any(
+        signal in lowered
+        for signal in ["train", "rail", "railroad", "commuter rail", "lirr", "metro-north", "amtrak"]
+    ):
+        preferred_modes.append("train")
+    if any(signal in lowered for signal in ["bus", "buses", "bus stop", "bus line"]):
+        preferred_modes.append("bus")
+
+    return sorted(set(preferred_modes))
+
+
+def _extract_food_scene_priority(query: str) -> bool:
+    """Detect whether the surrounding food scene matters."""
+
+    signals = [
+        "food",
+        "restaurants",
+        "restaurant",
+        "dining",
+        "cafes",
+        "cafe",
+        "coffee shops",
+        "groceries",
+        "grocery",
+        "takeout",
     ]
     lowered = query.lower()
     return any(signal in lowered for signal in signals)
@@ -241,7 +346,11 @@ def _build_preferences_dict(
     price_period: Literal["nightly", "monthly"],
     preferred_neighborhoods: list[str],
     desired_amenities: list[str],
+    commute_destinations: list[str],
     remote_work: bool,
+    transit_priority: bool,
+    preferred_transit_modes: list[str],
+    food_scene_priority: bool,
     quiet_preference: bool,
     review_min_rating: float | None,
     room_type: str | None,
@@ -256,7 +365,11 @@ def _build_preferences_dict(
         "price_preference": price_preference,
         "preferred_neighborhoods": preferred_neighborhoods,
         "desired_amenities": desired_amenities,
+        "commute_destinations": commute_destinations,
         "remote_work": remote_work,
+        "transit_priority": transit_priority,
+        "preferred_transit_modes": preferred_transit_modes,
+        "food_scene_priority": food_scene_priority,
         "quiet_preference": quiet_preference,
         "review_min_rating": review_min_rating,
         "room_type": room_type,
@@ -278,7 +391,11 @@ def _build_preferences_dict(
     soft_preferences = {
         "preferred_neighborhoods": preferred_neighborhoods,
         "desired_amenities": desired_amenities,
+        "commute_destinations": commute_destinations,
         "remote_work": remote_work,
+        "transit_priority": transit_priority,
+        "preferred_transit_modes": preferred_transit_modes,
+        "food_scene_priority": food_scene_priority,
         "quiet_preference": quiet_preference,
         "review_min_rating": review_min_rating,
         "target_price": target_price,
@@ -369,7 +486,11 @@ def parse_preferences_rule_based(user_query: str) -> dict[str, Any]:
     price_period = _extract_price_period(user_query, has_explicit_budget=max_price is not None)
     preferred_neighborhoods = _extract_preferred_neighborhoods(user_query)
     desired_amenities = _extract_amenities(user_query)
+    commute_destinations = _extract_commute_destinations(user_query)
     remote_work = _extract_remote_work_preference(user_query)
+    transit_priority = _extract_transit_priority(user_query, commute_destinations)
+    preferred_transit_modes = _extract_preferred_transit_modes(user_query)
+    food_scene_priority = _extract_food_scene_priority(user_query)
     review_min_rating = _extract_review_preference(user_query)
     room_type = _extract_room_type(user_query)
     quiet_preference = "quiet" in user_query.lower()
@@ -383,7 +504,11 @@ def parse_preferences_rule_based(user_query: str) -> dict[str, Any]:
         price_period=price_period,
         preferred_neighborhoods=preferred_neighborhoods,
         desired_amenities=desired_amenities,
+        commute_destinations=commute_destinations,
         remote_work=remote_work,
+        transit_priority=transit_priority,
+        preferred_transit_modes=preferred_transit_modes,
+        food_scene_priority=food_scene_priority,
         quiet_preference=quiet_preference,
         review_min_rating=review_min_rating,
         room_type=room_type,
@@ -416,7 +541,13 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any] | None:
             " - Do NOT use 'cheap' only because the user states a budget amount such as '$200 max' or 'budget is $150'.\\n"
             " - Use 'expensive' if the user mentions ANY of: expensive, luxury, high-end, premium, pricey, upscale, lavish, etc.\\n"
             " - Use 'moderate' for mid-range or reasonably priced.\\n"
-            " - Use 'none' only if no price-related quality is mentioned.\\n"
+            " - Use 'none' only if no price-related quality is mentioned.\\n\\n"
+            "COMMUTE, TRANSIT, AND LIFESTYLE INSTRUCTIONS:\\n"
+            " - If the user says they work in a place, study at a school, or commute to an area, add that place or school to commute_destinations.\\n"
+            " - If the user mentions subway access, public transit, easy commuting, or has commute destinations, set transit_priority to true.\\n"
+            " - Populate preferred_transit_modes when the user specifically prefers subway, train, or bus access.\\n"
+            " - If the user cares about restaurants, cafes, grocery access, dining, or the local food scene, set food_scene_priority to true.\\n"
+            " - Neighborhood intent is broader than exact neighborhood names; capture both literal area preferences and commute/lifestyle needs.\\n"
         ).format(query=user_query)
         
         result = structured_llm.invoke(prompt)
@@ -430,7 +561,11 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any] | None:
             price_preference=result.price_preference,
             preferred_neighborhoods=result.preferred_neighborhoods,
             desired_amenities=result.desired_amenities,
+            commute_destinations=result.commute_destinations,
             remote_work=result.remote_work,
+            transit_priority=result.transit_priority,
+            preferred_transit_modes=result.preferred_transit_modes,
+            food_scene_priority=result.food_scene_priority,
             quiet_preference=result.quiet_preference,
             review_min_rating=result.review_min_rating,
             room_type=result.room_type,
