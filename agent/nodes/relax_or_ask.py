@@ -26,10 +26,14 @@ def relax_or_ask_node(state: AgentState) -> AgentState:
         "user_question": None,
     }
 
-    if decision.action == "relax_soft":
+    if decision.action in {"relax_soft", "relax_hard"}:
         new_soft_preferences = _merge_preferences(
             state.get("soft_preferences", {}),
             decision.change.get("soft_preferences", {}),
+        )
+        new_hard_constraints = _merge_preferences(
+            state.get("hard_constraints", {}),
+            decision.change.get("hard_constraints", {}),
         )
         history_entry = {
             "attempt": int(state.get("attempt_count", 0)) + 1,
@@ -41,6 +45,7 @@ def relax_or_ask_node(state: AgentState) -> AgentState:
             {
                 "attempt_count": int(state.get("attempt_count", 0)) + 1,
                 "soft_preferences": new_soft_preferences,
+                "hard_constraints": new_hard_constraints,
                 "relaxation_history": list(state.get("relaxation_history", [])) + [history_entry],
             }
         )
@@ -84,6 +89,6 @@ def relax_or_ask_route(state: AgentState) -> str:
     if state.get("need_user_input"):
         return "wait_user"
     latest_action = (state.get("latest_decision") or {}).get("action")
-    if latest_action == "relax_soft":
+    if latest_action in {"relax_soft", "relax_hard"}:
         return "retry"
     return "explain"
