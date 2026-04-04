@@ -43,6 +43,7 @@ class ScoreBreakdown:
     amenity_match: float
     purpose_alignment: float
     neighborhood_fit: float
+    price_score: float
 
     def as_dict(self) -> dict[str, float]:
         """Return the score breakdown as a plain dictionary."""
@@ -52,6 +53,7 @@ class ScoreBreakdown:
             "amenity_match": self.amenity_match,
             "purpose_alignment": self.purpose_alignment,
             "neighborhood_fit": self.neighborhood_fit,
+            "price_score": self.price_score,
         }
 
 

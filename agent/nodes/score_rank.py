@@ -13,6 +13,7 @@ def score_rank_node(state: AgentState) -> AgentState:
     ranked = rank_listings(
         listings=state.get("filtered_listings", []),
         soft_preferences=state.get("soft_preferences", {}),
+        hard_constraints=state.get("hard_constraints", {}),
         shortlist_size=DEFAULT_CONFIG.shortlist_size,
         weights=DEFAULT_CONFIG.scoring_weights,
     )
