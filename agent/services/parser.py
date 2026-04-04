@@ -18,9 +18,17 @@ if HAS_LLM:
         min_bedrooms: int | None = Field(default=None, description="Minimum number of bedrooms")
         min_bathrooms: float | None = Field(default=None, description="Minimum number of bathrooms")
         max_price: float | None = Field(default=None, description="Maximum price or budget")
+        target_price: float | None = Field(
+            default=None,
+            description="Desired nightly or monthly target price when the user asks for a place around a certain dollar amount rather than a hard ceiling.",
+        )
+        price_period: Literal["nightly", "monthly"] = Field(
+            default="nightly",
+            description="Whether the stated price is nightly or monthly. Default to 'nightly' whenever a price is mentioned without an explicit time unit.",
+        )
         price_preference: Literal["cheap", "expensive", "moderate", "none"] = Field(
             default="none",
-            description="Qualitative price preference if explicit budget is not given. Use 'cheap' if user wants affordable/cheap options. Use 'expensive' for luxury. 'moderate' for mid-range. 'none' if unstated."
+            description="Qualitative price preference if explicit budget is not given. Use 'cheap' only for words like affordable, inexpensive, bargain, budget-friendly, or low-cost. Do not set 'cheap' just because the user states a budget amount."
         )
         preferred_neighborhoods: list[str] = Field(default_factory=list, description="Desired neighborhoods or areas")
         desired_amenities: list[str] = Field(default_factory=list, description="List of desired amenities, e.g. wifi, workspace, gym, laundry, parking")
@@ -103,6 +111,55 @@ def _extract_budget(query: str) -> float | None:
     return None
 
 
+def _extract_target_price(query: str, explicit_budget: float | None) -> float | None:
+    """Extract a desired target price when the user names a price without making it a hard ceiling."""
+
+    if explicit_budget is not None:
+        return None
+
+    patterns = [
+        r"(?:around|about|roughly|approximately|close to)\s*\$?(?P<amount>\d[\d,]*)",
+        r"\$?(?P<amount>\d[\d,]*)\s*(?:dollars?)?\s+(?:place|listing|apartment|room|stay)\b",
+        r"\$(?P<amount>\d[\d,]*)\b",
+        r"(?P<amount>\d[\d,]*)\$\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, query, flags=re.IGNORECASE)
+        if match:
+            return float(match.group("amount").replace(",", ""))
+    return None
+
+
+def _extract_price_period(query: str, has_explicit_budget: bool) -> Literal["nightly", "monthly"]:
+    """Infer the intended time unit for price mentions, defaulting to nightly."""
+
+    lowered = query.lower()
+    monthly_markers = [
+        "per month",
+        "a month",
+        "/month",
+        "monthly",
+        "month rent",
+        "monthly rent",
+    ]
+    nightly_markers = [
+        "per night",
+        "a night",
+        "/night",
+        "nightly",
+        "per day",
+        "daily",
+    ]
+
+    if any(marker in lowered for marker in monthly_markers):
+        return "monthly"
+    if any(marker in lowered for marker in nightly_markers):
+        return "nightly"
+    if has_explicit_budget:
+        return "nightly"
+    return "nightly"
+
+
 def _extract_preferred_neighborhoods(query: str) -> list[str]:
     """Extract soft neighborhood preferences from common phrasing."""
 
@@ -180,6 +237,8 @@ def _build_preferences_dict(
     min_bedrooms: int | None,
     min_bathrooms: float | None,
     max_price: float | None,
+    target_price: float | None,
+    price_period: Literal["nightly", "monthly"],
     preferred_neighborhoods: list[str],
     desired_amenities: list[str],
     remote_work: bool,
@@ -192,6 +251,8 @@ def _build_preferences_dict(
         "min_bedrooms": min_bedrooms,
         "min_bathrooms": min_bathrooms,
         "max_price": max_price,
+        "target_price": target_price,
+        "price_period": price_period,
         "price_preference": price_preference,
         "preferred_neighborhoods": preferred_neighborhoods,
         "desired_amenities": desired_amenities,
@@ -207,6 +268,7 @@ def _build_preferences_dict(
             "min_bedrooms": min_bedrooms,
             "min_bathrooms": min_bathrooms,
             "max_price": max_price,
+            "price_period": price_period,
             "room_type": room_type,
             "price_preference": price_preference,
         }.items()
@@ -219,6 +281,7 @@ def _build_preferences_dict(
         "remote_work": remote_work,
         "quiet_preference": quiet_preference,
         "review_min_rating": review_min_rating,
+        "target_price": target_price,
         "amenity_strictness": 1.0,
         "expanded_neighborhood_search": False,
     }
@@ -268,7 +331,21 @@ def _extract_price_preference(query: str) -> Literal["cheap", "expensive", "mode
 
     lowered = query.lower()
     
-    cheap_words = ["cheap", "affordable", "budget", "cost-effective", "inexpensive", "bargain", "low cost", "low-cost", "low price", "low-priced", "economic", "economical", "value"]
+    cheap_words = [
+        "cheap",
+        "affordable",
+        "budget-friendly",
+        "cost-effective",
+        "inexpensive",
+        "bargain",
+        "low cost",
+        "low-cost",
+        "low price",
+        "low-priced",
+        "economic",
+        "economical",
+        "value",
+    ]
     expensive_words = ["expensive", "luxury", "high-end", "premium", "pricey", "luxurious", "upscale", "high cost", "high-cost", "lavish"]
     moderate_words = ["moderate", "mid-range", "mid range", "average price", "reasonably priced", "fair price"]
     
@@ -288,6 +365,8 @@ def parse_preferences_rule_based(user_query: str) -> dict[str, Any]:
     min_bedrooms = _extract_bedrooms(user_query)
     min_bathrooms = _extract_bathrooms(user_query)
     max_price = _extract_budget(user_query)
+    target_price = _extract_target_price(user_query, explicit_budget=max_price)
+    price_period = _extract_price_period(user_query, has_explicit_budget=max_price is not None)
     preferred_neighborhoods = _extract_preferred_neighborhoods(user_query)
     desired_amenities = _extract_amenities(user_query)
     remote_work = _extract_remote_work_preference(user_query)
@@ -300,6 +379,8 @@ def parse_preferences_rule_based(user_query: str) -> dict[str, Any]:
         min_bedrooms=min_bedrooms,
         min_bathrooms=min_bathrooms,
         max_price=max_price,
+        target_price=target_price,
+        price_period=price_period,
         preferred_neighborhoods=preferred_neighborhoods,
         desired_amenities=desired_amenities,
         remote_work=remote_work,
@@ -321,9 +402,18 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any] | None:
         
         prompt = (
             "Extract user apartment leasing parameters from this query:\\n\\n{query}\\n\\n"
+            "CRITICAL INSTRUCTION FOR PRICE TYPE:\\n"
+            "Distinguish a hard ceiling budget from a target price.\\n"
+            " - Put values like 'under $200', '$200 max', 'budget is $200', or 'up to $200' into max_price.\\n"
+            " - Put values like '$200 place', 'around $200', or 'about $200 a night' into target_price instead.\\n"
+            " - Do not fill both max_price and target_price unless the user clearly expresses both.\\n\\n"
+            "CRITICAL INSTRUCTION FOR PRICE PERIOD:\\n"
+            "If the user mentions a price or budget without saying monthly/per month, default the price period to nightly.\\n"
+            "Only use 'monthly' when the query explicitly says monthly/per month/month rent.\\n\\n"
             "CRITICAL INSTRUCTION FOR PRICE PREFERENCE:\\n"
             "You MUST set 'price_preference' accurately based on ANY word that implies price.\\n"
-            " - Use 'cheap' if the user mentions ANY of: cheap, affordable, budget, bargain, low cost, inexpensive, economical, value, etc.\\n"
+            " - Use 'cheap' for words like cheap, affordable, budget-friendly, bargain, low cost, inexpensive, economical, value, etc.\\n"
+            " - Do NOT use 'cheap' only because the user states a budget amount such as '$200 max' or 'budget is $150'.\\n"
             " - Use 'expensive' if the user mentions ANY of: expensive, luxury, high-end, premium, pricey, upscale, lavish, etc.\\n"
             " - Use 'moderate' for mid-range or reasonably priced.\\n"
             " - Use 'none' only if no price-related quality is mentioned.\\n"
@@ -335,6 +425,8 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any] | None:
             min_bedrooms=result.min_bedrooms,
             min_bathrooms=result.min_bathrooms,
             max_price=result.max_price,
+            target_price=result.target_price,
+            price_period=result.price_period,
             price_preference=result.price_preference,
             preferred_neighborhoods=result.preferred_neighborhoods,
             desired_amenities=result.desired_amenities,
