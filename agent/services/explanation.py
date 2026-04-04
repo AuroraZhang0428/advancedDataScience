@@ -43,8 +43,10 @@ def _describe_top_strengths(score_breakdown: dict[str, float]) -> list[str]:
         "review_rating": "strong review quality",
         "amenity_match": "amenities that line up well with the request",
         "purpose_alignment": "a good fit for how the user wants to use the space",
-        "neighborhood_fit": "location alignment with the preferred area",
+        "neighborhood_fit": "strong alignment with the preferred area, commute, and neighborhood lifestyle",
         "price_score": "excellent price value relative to the budget",
+        "google_maps_fit": "strong live neighborhood context for transit, food, grocery access, and commute",
+        "stage_two_llm_fit": "strong holistic fit after balancing the live neighborhood evidence",
     }
     ranked = sorted(score_breakdown.items(), key=lambda item: item[1], reverse=True)
     return [labels[key] for key, value in ranked if value >= 0.65 and key in labels]
@@ -57,8 +59,10 @@ def _describe_tradeoffs(score_breakdown: dict[str, float]) -> list[str]:
         "review_rating": "review quality is acceptable rather than exceptional",
         "amenity_match": "some requested amenities may be missing",
         "purpose_alignment": "remote-work or quiet-work support is not perfect",
-        "neighborhood_fit": "the listing is a weaker location match than the top neighborhood choices",
+        "neighborhood_fit": "the commute, transit, food scene, or neighborhood fit is weaker than the top choices",
         "price_score": "the price is less ideal compared to budget or price preference",
+        "google_maps_fit": "the nearby transit, food, grocery access, or live commute picture is weaker than the top choices",
+        "stage_two_llm_fit": "the final holistic balancing step still found stronger overall alternatives",
     }
     ranked = sorted(score_breakdown.items(), key=lambda item: item[1])
     tradeoffs = [labels[key] for key, value in ranked if value < 0.60 and key in labels]
@@ -80,6 +84,7 @@ def generate_listing_explanation(
     """Generate a deterministic explanation for a single recommendation."""
 
     title = listing.get("title") or "This listing"
+    host_name = listing.get("host_name") or listing.get("raw", {}).get("host_name")
     neighborhood = listing.get("neighborhood") or listing.get("neighborhood_group") or "the searched area"
     score = float(listing.get("score", 0.0))
     breakdown = {
@@ -94,6 +99,8 @@ def generate_listing_explanation(
 
     facts: list[str] = [f"{title} stands out with an overall score of {score:.2f}."]
     facts.append(f"It is located in {neighborhood}.")
+    if host_name:
+        facts.append(f"Host: {host_name}.")
     if price is not None and str(price).strip():
         facts.append(f"Price: ${float(price):,.0f}")
 
@@ -132,6 +139,56 @@ def generate_listing_explanation(
         preferred_text = ", ".join(str(area) for area in preferred_neighborhoods)
         facts.append(f"Preferred areas considered: {preferred_text}.")
 
+    location_context = dict(listing.get("location_context") or {})
+    if location_context.get("google_maps_enriched"):
+        location_facts: list[str] = []
+        transit_count = location_context.get("nearby_transit_count")
+        subway_count = location_context.get("nearby_subway_count")
+        train_count = location_context.get("nearby_train_count")
+        bus_count = location_context.get("nearby_bus_count")
+        food_count = location_context.get("nearby_food_count")
+        grocery_count = location_context.get("nearby_grocery_count")
+        avg_commute = location_context.get("average_commute_minutes")
+        preferred_transit_modes = location_context.get("preferred_transit_modes") or []
+        if preferred_transit_modes:
+            mode_text = ", ".join(str(mode) for mode in preferred_transit_modes)
+            location_facts.append(f"preferred transit focus: {mode_text}")
+        if subway_count:
+            location_facts.append(f"{int(subway_count)} nearby subway stops")
+        if train_count:
+            location_facts.append(f"{int(train_count)} nearby train stops")
+        if bus_count:
+            location_facts.append(f"{int(bus_count)} nearby bus stops")
+        if not any([subway_count, train_count, bus_count]) and transit_count is not None:
+            location_facts.append(f"{transit_count} nearby transit options")
+        if food_count is not None:
+            location_facts.append(f"{food_count} nearby food spots")
+        if grocery_count is not None:
+            location_facts.append(f"{grocery_count} nearby grocery options")
+        if avg_commute is not None:
+            location_facts.append(f"average live commute about {float(avg_commute):.0f} minutes")
+        if location_facts:
+            facts.append("Live Google Maps context: " + ", ".join(location_facts) + ".")
+
+        transit_examples = location_context.get("nearby_transit_examples") or []
+        subway_examples = location_context.get("nearby_subway_examples") or []
+        train_examples = location_context.get("nearby_train_examples") or []
+        bus_examples = location_context.get("nearby_bus_examples") or []
+        food_examples = location_context.get("nearby_food_examples") or []
+        if subway_examples:
+            facts.append("Nearby subway examples: " + ", ".join(str(item) for item in subway_examples[:3]) + ".")
+        if train_examples:
+            facts.append("Nearby train examples: " + ", ".join(str(item) for item in train_examples[:3]) + ".")
+        if bus_examples:
+            facts.append("Nearby bus examples: " + ", ".join(str(item) for item in bus_examples[:3]) + ".")
+        if not any([subway_examples, train_examples, bus_examples]) and transit_examples:
+            facts.append("Nearby transit examples: " + ", ".join(str(item) for item in transit_examples[:3]) + ".")
+        if food_examples:
+            facts.append("Nearby food examples: " + ", ".join(str(item) for item in food_examples[:3]) + ".")
+        commute_summaries = location_context.get("commute_summaries") or []
+        if commute_summaries:
+            facts.append("Detailed commute check: " + "; ".join(str(item) for item in commute_summaries[:3]) + ".")
+
     if relaxation_history:
         latest = relaxation_history[-1]
         facts.append(
@@ -139,12 +196,19 @@ def generate_listing_explanation(
             f"{latest.get('action', 'making a trade-off')} because {latest.get('reason', 'results were limited')}."
         )
 
+    llm_rank_reason = str(listing.get("llm_rank_reason") or "").strip()
+    if llm_rank_reason:
+        facts.append(f"Final balancing note: {llm_rank_reason}.")
+
     if breakdown:
         facts.append(
             "Score breakdown: "
             + ", ".join(f"{key}={value:.2f}" for key, value in breakdown.items())
             + "."
         )
+
+    if host_name:
+        facts.append(f"Search tip: look up the listing title together with host {host_name} to find the exact Airbnb more easily.")
 
     # Rewrite the deterministic draft into a more polished narrative using an LLM.
     draft_explanation = " ".join(facts)

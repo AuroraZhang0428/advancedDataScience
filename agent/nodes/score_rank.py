@@ -8,7 +8,7 @@ from agent.state import AgentState
 
 
 def score_rank_node(state: AgentState) -> AgentState:
-    """Score filtered listings and keep a shortlist."""
+    """Score filtered listings and keep the stage-one shortlist."""
 
     ranked = rank_listings(
         listings=state.get("filtered_listings", []),
@@ -19,5 +19,5 @@ def score_rank_node(state: AgentState) -> AgentState:
     )
     return {
         "scored_listings": ranked,
-        "shortlisted_listings": ranked[: DEFAULT_CONFIG.top_k_recommendations],
+        "shortlisted_listings": ranked[: DEFAULT_CONFIG.shortlist_size],
     }

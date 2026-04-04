@@ -12,6 +12,7 @@ class Listing:
 
     id: str
     title: str
+    host_name: str | None = None
     neighborhood: str | None = None
     neighborhood_group: str | None = None
     price: float | None = None

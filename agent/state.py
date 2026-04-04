@@ -18,6 +18,8 @@ class AgentState(TypedDict, total=False):
     filtered_listings: list[dict[str, Any]]
     scored_listings: list[dict[str, Any]]
     shortlisted_listings: list[dict[str, Any]]
+    enriched_listings: list[dict[str, Any]]
+    google_enrichment_diagnostics: dict[str, Any]
     sufficient_results: bool
     results_diagnostics: dict[str, Any]
     attempt_count: int
