@@ -4,6 +4,37 @@ from __future__ import annotations
 
 from typing import Any
 
+import os
+try:
+    from langchain_openai import ChatOpenAI
+    from langchain_core.prompts import PromptTemplate
+except ImportError:
+    ChatOpenAI = None
+    PromptTemplate = None
+
+def _rewrite_with_llm(draft: str) -> str:
+    """Use an LLM to rewrite the deterministic draft."""
+    if ChatOpenAI is None or PromptTemplate is None or not os.environ.get("OPENAI_API_KEY"):
+        return draft
+    
+    try:
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
+        prompt = PromptTemplate.from_template(
+            "You are an expert real estate and leasing agent.\n"
+            "Rewrite the following deterministic listing description into a polished, natural, "
+            "and persuasive short paragraph.\n"
+            "CRITICAL: You MUST include the exact numerical listing price (e.g., $1,500) and explicit trade-offs.\n"
+            "Maintain all factual information, score breakdowns, and make it sound conversational.\n"
+            "Ensure you clearly emphasize whether the price matches the user's budget and qualitative preference (cheap/expensive).\n\n"
+            "Draft:\n{draft}\n\nPolished Version:"
+        )
+        chain = prompt | llm
+        result = chain.invoke({"draft": draft})
+        return result.content.strip()
+    except Exception as e:
+        print(f"Warning: LLM rewrite failed: {e}")
+        return draft
+
 
 def _describe_top_strengths(score_breakdown: dict[str, float]) -> list[str]:
     """Turn the strongest score components into user-facing phrases."""
@@ -13,9 +44,10 @@ def _describe_top_strengths(score_breakdown: dict[str, float]) -> list[str]:
         "amenity_match": "amenities that line up well with the request",
         "purpose_alignment": "a good fit for how the user wants to use the space",
         "neighborhood_fit": "location alignment with the preferred area",
+        "price_score": "excellent price value relative to the budget",
     }
     ranked = sorted(score_breakdown.items(), key=lambda item: item[1], reverse=True)
-    return [labels[key] for key, value in ranked[:2] if value >= 0.65 and key in labels]
+    return [labels[key] for key, value in ranked if value >= 0.65 and key in labels]
 
 
 def _describe_tradeoffs(score_breakdown: dict[str, float]) -> list[str]:
@@ -26,9 +58,17 @@ def _describe_tradeoffs(score_breakdown: dict[str, float]) -> list[str]:
         "amenity_match": "some requested amenities may be missing",
         "purpose_alignment": "remote-work or quiet-work support is not perfect",
         "neighborhood_fit": "the listing is a weaker location match than the top neighborhood choices",
+        "price_score": "the price is less ideal compared to budget or price preference",
     }
     ranked = sorted(score_breakdown.items(), key=lambda item: item[1])
-    return [labels[key] for key, value in ranked[:2] if value < 0.60 and key in labels]
+    tradeoffs = [labels[key] for key, value in ranked if value < 0.60 and key in labels]
+    
+    if not tradeoffs and ranked:
+        lowest_key, lowest_val = ranked[0]
+        if lowest_val < 0.95 and lowest_key in labels:
+            tradeoffs.append(f"relatively speaking, {labels[lowest_key]}")
+            
+    return tradeoffs
 
 
 def generate_listing_explanation(
@@ -54,6 +94,8 @@ def generate_listing_explanation(
 
     facts: list[str] = [f"{title} stands out with an overall score of {score:.2f}."]
     facts.append(f"It is located in {neighborhood}.")
+    if price is not None and str(price).strip():
+        facts.append(f"Price: ${float(price):,.0f}")
 
     detail_bits: list[str] = []
     if bedrooms is not None:
@@ -104,9 +146,9 @@ def generate_listing_explanation(
             + "."
         )
 
-    # TODO: Add an optional LLM rewrite step here to turn the deterministic draft
-    # into a more polished narrative while preserving the same factual content.
-    return " ".join(facts)
+    # Rewrite the deterministic draft into a more polished narrative using an LLM.
+    draft_explanation = " ".join(facts)
+    return _rewrite_with_llm(draft_explanation)
 
 
 def generate_final_output(

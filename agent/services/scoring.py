@@ -144,9 +144,64 @@ def compute_neighborhood_score(listing: dict[str, Any], soft_preferences: dict[s
     return _clip(best)
 
 
+def compute_price_score(listing: dict[str, Any], hard_constraints: dict[str, Any]) -> float:
+    """
+    Computes a price score (0 to 1) comparing price versus budget.
+    We apply a simple heuristic, incorporating qualitative price preferences.
+    """
+    price = _safe_float(listing.get("price"))
+    if price is None:
+        return 0.5  # Neutral score if price is unknown
+    if price <= 0:
+        return 0.5
+        
+    score: float = 0.5
+    price_preference = hard_constraints.get("price_preference", "none")
+    budget = _safe_float(hard_constraints.get("max_price"))
+    
+    if budget is not None and budget > 0:
+        if price <= budget:
+            base_score = 1.0 - (price / budget) * 0.2  # 0.8 to 1.0
+        else:
+            ratio = price / budget
+            base_score = max(0.0, 1.5 - ratio)  # drops to 0 at 1.5x budget
+            
+        if price_preference == "cheap":
+            discount_ratio = max(0.0, (budget - price) / budget)
+            base_score += discount_ratio * 0.5
+        elif price_preference == "expensive" and price <= budget:
+            ratio = price / budget
+            base_score = min(1.0, 0.7 + ratio * 0.3)
+            
+        score = base_score
+    else:
+        if price_preference == "cheap":
+            # Heavily favor lower prices, drop quickly
+            normalized = price / 300.0
+            score = 1.0 - min(normalized, 1.0)
+        elif price_preference == "expensive":
+            # Favor luxury or higher prices. Map $0 to $1000 range positively
+            normalized = price / 1000.0
+            score = min(normalized, 1.0)
+            # Give a slight bump so anything over $500 gets a good score
+            if price > 500:
+                score = max(score, 0.8)
+        elif price_preference == "moderate":
+            # Best score in the middle (e.g. $150-$300)
+            diff = abs(price - 200.0)
+            score = 1.0 - min(diff / 400.0, 1.0)
+        else:
+            # Default distribution for NYC, slight preference for cheaper
+            normalized = price / 500.0  # arbitrary normalization factor
+            score = 1.0 - min(normalized, 1.0)
+        
+    return _clip(score)
+
+
 def score_listing(
     listing: dict[str, Any],
     soft_preferences: dict[str, Any],
+    hard_constraints: dict[str, Any],
     weights: ScoringWeights | None = None,
 ) -> dict[str, Any]:
     """Compute a transparent weighted score and score breakdown for one listing."""
@@ -157,6 +212,7 @@ def score_listing(
         amenity_match=compute_amenity_match(listing, soft_preferences),
         purpose_alignment=compute_purpose_alignment(listing, soft_preferences),
         neighborhood_fit=compute_neighborhood_score(listing, soft_preferences),
+        price_score=compute_price_score(listing, hard_constraints),
     )
     breakdown_dict = breakdown.as_dict()
     weighted_sum = 0.0
@@ -174,12 +230,13 @@ def score_listing(
 def rank_listings(
     listings: list[dict[str, Any]],
     soft_preferences: dict[str, Any],
+    hard_constraints: dict[str, Any],
     shortlist_size: int | None = None,
     weights: ScoringWeights | None = None,
 ) -> list[dict[str, Any]]:
     """Score and sort listings from best to worst."""
 
-    scored = [score_listing(listing, soft_preferences, weights=weights) for listing in listings]
+    scored = [score_listing(listing, soft_preferences, hard_constraints, weights=weights) for listing in listings]
     scored.sort(
         key=lambda item: (
             item.get("score", 0.0),

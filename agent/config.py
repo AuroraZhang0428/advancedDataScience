@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DATASET_PATH = PROJECT_ROOT / "listings.csv"
+DEFAULT_DATASET_PATH = Path("matched_subset_dataset.csv")
 
 MAX_ATTEMPTS = 3
 MINIMUM_GOOD_RESULTS = 3
@@ -20,10 +20,11 @@ SHORTLIST_SIZE = 10
 class ScoringWeights:
     """Weights for deterministic listing scoring."""
 
-    review_rating: float = 0.30
+    review_rating: float = 0.20
     amenity_match: float = 0.20
-    purpose_alignment: float = 0.30
+    purpose_alignment: float = 0.20
     neighborhood_fit: float = 0.20
+    price_score: float = 0.20
 
     def as_dict(self) -> dict[str, float]:
         """Return weights in plain-dictionary form."""
@@ -33,6 +34,7 @@ class ScoringWeights:
             "amenity_match": self.amenity_match,
             "purpose_alignment": self.purpose_alignment,
             "neighborhood_fit": self.neighborhood_fit,
+            "price_score": self.price_score,
         }
 
 

@@ -32,6 +32,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Run the apartment leasing agent demo.")
     parser.add_argument("--query", default=DEFAULT_QUERY, help="User apartment search query.")
+    parser.add_argument("--api-key", default=None, help="OpenAI API Key for GenAI features.")
     parser.add_argument(
         "--dataset",
         default=str(DEFAULT_CONFIG.dataset_path),
@@ -39,10 +40,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    import os
+    if args.api_key:
+        os.environ["OPENAI_API_KEY"] = args.api_key
+    elif "OPENAI_API_KEY" not in os.environ:
+        import getpass
+        key = getpass.getpass("Enter your OpenAI API key for GenAI parsing & explanations (or press Enter to skip): ")
+        if key.strip():
+            os.environ["OPENAI_API_KEY"] = key.strip()
+
     graph = build_graph()
+    
+    # Prompt for user query
+    active_query = args.query
+    if active_query == DEFAULT_QUERY:
+        user_input = input("What type of apartment are you looking for? (Press Enter to use the default test query): ")
+        if user_input.strip():
+            active_query = user_input.strip()
+
     result = graph.invoke(
         {
-            "user_query": args.query,
+            "user_query": active_query,
             "dataset_path": args.dataset,
         }
     )
