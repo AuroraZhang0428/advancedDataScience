@@ -87,6 +87,13 @@ def google_maps_available() -> bool:
     return bool(os.environ.get("GOOGLE_MAPS_API_KEY"))
 
 
+def _require_google_maps() -> None:
+    """Ensure Google Maps enrichment is available."""
+
+    if not google_maps_available():
+        raise RuntimeError("GOOGLE_MAPS_API_KEY is required because Google Maps enrichment fallback has been removed.")
+
+
 def _post_json(url: str, payload: dict[str, Any], field_mask: str) -> dict[str, Any]:
     """Send a JSON POST request to a Google Maps Platform endpoint."""
 
@@ -273,7 +280,7 @@ def _location_context_summary(listing: dict[str, Any]) -> str:
     grocery_examples = ", ".join(context.get("nearby_grocery_examples", [])[:3]) or "none"
     return (
         f"id={listing.get('id')} | title={listing.get('title', 'Untitled')} | neighborhood={neighborhood} | "
-        f"price=${float(price):,.0f} nightly | score={float(listing.get('score', 0.0)):.2f} | "
+        f"price=${float(price):,.0f} nightly | stage_one_fit={float(listing.get('score', 0.0)):.2f} | "
         f"review_rating={listing.get('review_rating')} | detailed_location_score={float(listing.get('detailed_location_score', 0.0)):.2f} | "
         f"preferred_transit_modes={preferred_transit_modes} | "
         f"subway_count={subway_count} ({subway_examples}) | "
@@ -292,15 +299,24 @@ def _llm_is_available() -> bool:
     return HAS_LLM and ChatOpenAI is not None and bool(os.environ.get("OPENAI_API_KEY"))
 
 
+def _require_llm_reranking() -> None:
+    """Ensure the OpenAI-backed stage-two reranking path is available."""
+
+    if not _llm_is_available():
+        raise RuntimeError("OPENAI_API_KEY is required because non-LLM stage-two reranking fallback has been removed.")
+
+
 def _rerank_enriched_with_llm(
     listings: list[dict[str, Any]],
     soft_preferences: dict[str, Any],
     hard_constraints: dict[str, Any],
-) -> list[dict[str, Any]] | None:
+) -> list[dict[str, Any]]:
     """Use the LLM to balance the enriched neighborhood facts holistically."""
 
-    if not _llm_is_available() or not listings:
-        return None
+    if not listings:
+        return []
+
+    _require_llm_reranking()
 
     try:
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
@@ -309,7 +325,8 @@ def _rerank_enriched_with_llm(
             "You are balancing apartment recommendations after live Google Maps enrichment.\n"
             "Use the retrieved transit, food, grocery, and commute facts as primary evidence.\n"
             "Do not invent neighborhood facts beyond what is provided.\n"
-            "Treat the current numeric score as a strong prior, but rerank candidates based on the user's likely lived experience.\n"
+            "Use the earlier stage_one_fit only as coarse context from retrieval, not as a prior you must follow.\n"
+            "If the live neighborhood evidence points somewhere else, trust the live evidence.\n"
             "Return every candidate id sorted best to worst with fit_score values between 0.0 and 1.0.\n\n"
             f"Hard constraints:\n{hard_constraints}\n\n"
             f"Soft preferences:\n{soft_preferences}\n\n"
@@ -318,8 +335,7 @@ def _rerank_enriched_with_llm(
         )
         response = structured_llm.invoke(prompt)
     except Exception as exc:
-        print(f"Warning: enriched LLM reranking failed: {exc}")
-        return None
+        raise RuntimeError(f"OpenAI-backed stage-two reranking failed: {exc}") from exc
 
     candidate_map = {str(listing.get("id")): dict(listing) for listing in listings}
     reranked: list[dict[str, Any]] = []
@@ -330,10 +346,10 @@ def _rerank_enriched_with_llm(
             continue
         prior_score = float(listing.get("score", 0.0))
         llm_fit_score = _clip(float(candidate.fit_score))
-        listing["pre_enrichment_llm_score"] = round(prior_score, 4)
+        listing["pre_enrichment_score"] = round(prior_score, 4)
         listing["stage_two_llm_fit_score"] = round(llm_fit_score, 4)
         listing["llm_rank_reason"] = candidate.reason.strip()
-        listing["score"] = round((0.35 * prior_score) + (0.65 * llm_fit_score), 4)
+        listing["score"] = round(llm_fit_score, 4)
         score_breakdown = dict(listing.get("score_breakdown", {}))
         score_breakdown["google_maps_fit"] = round(float(listing.get("detailed_location_score", 0.0)), 4)
         score_breakdown["stage_two_llm_fit"] = round(llm_fit_score, 4)
@@ -513,10 +529,6 @@ def _enrich_listing(
     enriched["detailed_location_score"] = round(_clip(detailed_location_score), 4)
     enriched["score_breakdown"] = dict(enriched.get("score_breakdown", {}))
     enriched["score_breakdown"]["google_maps_fit"] = enriched["detailed_location_score"]
-    enriched["score"] = round(
-        (0.65 * float(enriched.get("score", 0.0))) + (0.35 * enriched["detailed_location_score"]),
-        4,
-    )
     return enriched, warnings
 
 
@@ -530,8 +542,7 @@ def enrich_and_rerank_listings(
     if not listings:
         return [], {"google_maps_used": False, "reason": "no_shortlisted_listings"}
 
-    if not google_maps_available():
-        return list(listings), {"google_maps_used": False, "reason": "missing_google_maps_api_key"}
+    _require_google_maps()
 
     commute_destinations = [
         str(item).strip()
@@ -558,7 +569,7 @@ def enrich_and_rerank_listings(
         soft_preferences=soft_preferences,
         hard_constraints=hard_constraints,
     )
-    final_ranked = llm_reranked if llm_reranked is not None else enriched_listings
+    final_ranked = llm_reranked
     final_ranked.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
 
     diagnostics = {
@@ -566,6 +577,6 @@ def enrich_and_rerank_listings(
         "resolved_commute_destinations": [item["name"] for item in resolved_destinations],
         "warnings": warnings,
         "listing_count_enriched": len(enriched_listings),
-        "stage_two_llm_used": llm_reranked is not None,
+        "stage_two_llm_used": True,
     }
     return final_ranked, diagnostics

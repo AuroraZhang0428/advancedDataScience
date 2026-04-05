@@ -22,7 +22,7 @@ except ImportError:
 
 if HAS_LLM:
     class AutonomousRelaxationChoice(BaseModel):
-        action: str = Field(description="One of 'relax_soft', 'relax_hard', or 'stop'.")
+        action: str = Field(description="One of 'relax_soft', 'relax_hard', 'ask_user', or 'stop'.")
         relaxed_key: str | None = Field(
             default=None,
             description="The logical constraint to relax, or null when action is stop.",
@@ -46,6 +46,13 @@ def _llm_is_available() -> bool:
     return HAS_LLM and ChatOpenAI is not None and bool(os.environ.get("OPENAI_API_KEY"))
 
 
+def _require_llm_relaxation() -> None:
+    """Ensure the OpenAI-backed relaxation policy is available."""
+
+    if not _llm_is_available():
+        raise RuntimeError("OPENAI_API_KEY is required because rule-based relaxation fallback has been removed.")
+
+
 def _effective_budget_value(hard_constraints: dict[str, Any], relaxable_constraints: dict[str, Any]) -> float | None:
     """Compute the next autonomous budget target when budget relaxation is chosen."""
 
@@ -56,6 +63,26 @@ def _effective_budget_value(hard_constraints: dict[str, Any], relaxable_constrai
     return round(float(current_budget) * (1 + suggested_increase_pct), 2)
 
 
+def _effective_target_value(soft_preferences: dict[str, Any], relaxable_constraints: dict[str, Any], listings: list[dict[str, Any]]) -> float | None:
+    """Compute a more realistic target price suggestion when the user's target is too low."""
+
+    current_target = soft_preferences.get("target_price")
+    if current_target is None:
+        return None
+
+    available_prices = sorted(
+        float(listing["price"])
+        for listing in listings
+        if listing.get("price") is not None
+    )
+    if available_prices:
+        reference_price = available_prices[0]
+        return round(max(float(current_target) * 1.5, reference_price), 2)
+
+    suggested_increase_pct = float(relaxable_constraints.get("target_price", {}).get("suggested_increase_pct", 0.5))
+    return round(float(current_target) * (1 + suggested_increase_pct), 2)
+
+
 def _available_relaxation_options(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Build the currently valid autonomous relaxation options."""
 
@@ -63,7 +90,31 @@ def _available_relaxation_options(state: dict[str, Any]) -> list[dict[str, Any]]
     soft_preferences = state.get("soft_preferences", {})
     hard_constraints = state.get("hard_constraints", {})
     relaxable_constraints = state.get("relaxable_constraints", {})
+    results_diagnostics = state.get("results_diagnostics", {})
+    filtered_listings = state.get("filtered_listings", [])
+    questions_asked = set(state.get("questions_asked", []))
     options: list[dict[str, Any]] = []
+
+    if (
+        results_diagnostics.get("target_price_fit_poor")
+        and relaxable_constraints.get("target_price", {}).get("can_relax")
+        and "target_price" not in questions_asked
+    ):
+        current_target = float(soft_preferences.get("target_price", 0.0))
+        suggested_target = _effective_target_value(soft_preferences, relaxable_constraints, filtered_listings)
+        if suggested_target is not None:
+            options.append(
+                {
+                    "relaxed_key": "target_price",
+                    "action": "ask_user",
+                    "question_key": "target_price",
+                    "user_question": (
+                        f"I could not find robust matches near your target of ${current_target:,.0f} per night. "
+                        f"Would you like me to search closer to about ${suggested_target:,.0f} per night instead?"
+                    ),
+                    "change": {},
+                }
+            )
 
     if (
         relaxable_constraints.get("preferred_neighborhoods", {}).get("can_relax")
@@ -120,29 +171,39 @@ def _available_relaxation_options(state: dict[str, Any]) -> list[dict[str, Any]]
     if (
         relaxable_constraints.get("min_bedrooms", {}).get("can_relax")
         and hard_constraints.get("min_bedrooms") is not None
-        and not _history_contains(relaxation_history, "min_bedrooms")
+        and "min_bedrooms" not in questions_asked
     ):
         current_bedrooms = int(hard_constraints["min_bedrooms"])
         options.append(
             {
                 "relaxed_key": "min_bedrooms",
-                "action": "relax_hard",
-                "change": {"hard_constraints": {"min_bedrooms": max(current_bedrooms - 1, 0)}},
+                "action": "ask_user",
+                "question_key": "min_bedrooms",
+                "user_question": (
+                    f"Would you consider {max(current_bedrooms - 1, 0)} bedroom(s) instead of {current_bedrooms} "
+                    "if that unlocks stronger matches?"
+                ),
+                "change": {},
             }
         )
 
     if (
         relaxable_constraints.get("max_price", {}).get("can_relax")
         and hard_constraints.get("max_price") is not None
-        and not _history_contains(relaxation_history, "max_price")
+        and "max_price" not in questions_asked
     ):
         next_budget = _effective_budget_value(hard_constraints, relaxable_constraints)
         if next_budget is not None:
             options.append(
                 {
                     "relaxed_key": "max_price",
-                    "action": "relax_hard",
-                    "change": {"hard_constraints": {"max_price": next_budget}},
+                    "action": "ask_user",
+                    "question_key": "max_price",
+                    "user_question": (
+                        f"Would you be open to increasing the budget from ${float(hard_constraints['max_price']):,.0f} "
+                        f"to about ${next_budget:,.0f} for better matches?"
+                    ),
+                    "change": {},
                 }
             )
 
@@ -166,11 +227,10 @@ def _top_candidate_summary(state: dict[str, Any], limit: int = 3) -> str:
     return "\n".join(lines)
 
 
-def _choose_relaxation_action_llm(state: dict[str, Any]) -> RelaxationDecision | None:
+def _choose_relaxation_action_llm(state: dict[str, Any]) -> RelaxationDecision:
     """Use the LLM to choose the next autonomous relaxation step."""
 
-    if not _llm_is_available():
-        return None
+    _require_llm_relaxation()
 
     attempt_count = int(state.get("attempt_count", 0))
     if attempt_count >= DEFAULT_CONFIG.max_attempts:
@@ -191,9 +251,9 @@ def _choose_relaxation_action_llm(state: dict[str, Any]) -> RelaxationDecision |
         structured_llm = llm.with_structured_output(AutonomousRelaxationChoice)
         prompt = (
             "You are controlling an autonomous apartment recommendation agent.\n"
-            "Choose the single best next action to improve result quality without asking the user.\n"
+            "Choose the single best next action to improve result quality.\n"
             "You may only choose one of the supplied options or stop.\n"
-            "Prefer the least destructive relaxation that is likely to materially improve results.\n\n"
+            "Prefer the least destructive change, and ask the user before weakening semi-hard constraints or unrealistic price targets.\n\n"
             f"Attempt count: {attempt_count}\n"
             f"Results diagnostics: {state.get('results_diagnostics', {})}\n"
             f"Hard constraints: {state.get('hard_constraints', {})}\n"
@@ -203,8 +263,7 @@ def _choose_relaxation_action_llm(state: dict[str, Any]) -> RelaxationDecision |
         )
         choice = structured_llm.invoke(prompt)
     except Exception as exc:
-        print(f"Warning: LLM relaxation decision failed: {exc}")
-        return None
+        raise RuntimeError(f"OpenAI-backed relaxation decision failed: {exc}") from exc
 
     if str(choice.action).lower() == "stop":
         return RelaxationDecision(action="stop", reason=choice.reason)
@@ -213,6 +272,14 @@ def _choose_relaxation_action_llm(state: dict[str, Any]) -> RelaxationDecision |
     selected_option = next((option for option in options if option["relaxed_key"] == selected_key), None)
     if selected_option is None:
         return RelaxationDecision(action="stop", reason="LLM selected an unsupported relaxation, so the agent will stop safely.")
+
+    if str(choice.action).lower() == "ask_user":
+        return RelaxationDecision(
+            action="ask_user",
+            reason=choice.reason,
+            user_question=selected_option.get("user_question"),
+            change={"question_key": selected_option.get("question_key")},
+        )
 
     return RelaxationDecision(
         action=selected_option["action"],
@@ -234,11 +301,30 @@ def _choose_relaxation_action_rule_based(state: dict[str, Any]) -> RelaxationDec
     relaxable_constraints = state.get("relaxable_constraints", {})
     questions_asked = set(state.get("questions_asked", []))
     filtered_listings = state.get("filtered_listings", [])
+    results_diagnostics = state.get("results_diagnostics", {})
 
     if attempt_count >= DEFAULT_CONFIG.max_attempts:
         return RelaxationDecision(
             action="stop",
             reason="Maximum search attempts reached, so the agent will explain the best available options.",
+        )
+
+    if (
+        results_diagnostics.get("target_price_fit_poor")
+        and relaxable_constraints.get("target_price", {}).get("can_relax")
+        and "target_price" not in questions_asked
+        and soft_preferences.get("target_price") is not None
+    ):
+        current_target = float(soft_preferences["target_price"])
+        suggested_target = _effective_target_value(soft_preferences, relaxable_constraints, filtered_listings)
+        return RelaxationDecision(
+            action="ask_user",
+            reason="The current target price appears too far from the available listings, so the agent should confirm whether to search at a more realistic nightly price.",
+            user_question=(
+                f"I could not find robust matches near your target of ${current_target:,.0f} per night. "
+                f"Would you like me to search closer to about ${float(suggested_target or current_target):,.0f} per night instead?"
+            ),
+            change={"question_key": "target_price"},
         )
 
     if not filtered_listings:
@@ -375,9 +461,6 @@ def _choose_relaxation_action_rule_based(state: dict[str, Any]) -> RelaxationDec
 
 
 def choose_relaxation_action(state: dict[str, Any]) -> RelaxationDecision:
-    """Choose the next relaxation step, preferring the autonomous LLM policy when available."""
+    """Choose the next relaxation step using only the LLM policy."""
 
-    llm_decision = _choose_relaxation_action_llm(state)
-    if llm_decision is not None:
-        return llm_decision
-    return _choose_relaxation_action_rule_based(state)
+    return _choose_relaxation_action_llm(state)
