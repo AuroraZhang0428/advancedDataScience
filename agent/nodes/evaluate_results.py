@@ -12,6 +12,8 @@ def evaluate_results_node(state: AgentState) -> AgentState:
 
     sufficient, diagnostics = results_are_sufficient(
         scored_listings=state.get("scored_listings", []),
+        hard_constraints=state.get("hard_constraints", {}),
+        soft_preferences=state.get("soft_preferences", {}),
         minimum_good_results=DEFAULT_CONFIG.minimum_good_results,
         good_score_threshold=DEFAULT_CONFIG.good_score_threshold,
     )

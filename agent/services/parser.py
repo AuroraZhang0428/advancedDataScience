@@ -12,11 +12,41 @@ try:
     HAS_LLM = True
 except ImportError:
     HAS_LLM = False
+    BaseModel = None
+    Field = None
+    ChatOpenAI = None
 
 if HAS_LLM:
+    class PreferenceWeights(BaseModel):
+        review_rating: float = Field(
+            default=0.2,
+            description="Relative importance of review quality from 0.0 to 1.0.",
+        )
+        amenity_match: float = Field(
+            default=0.2,
+            description="Relative importance of amenity fit from 0.0 to 1.0.",
+        )
+        purpose_alignment: float = Field(
+            default=0.2,
+            description="Relative importance of remote-work, quiet, or usage fit from 0.0 to 1.0.",
+        )
+        neighborhood_fit: float = Field(
+            default=0.2,
+            description="Relative importance of neighborhood, commute, transit, and local-area fit from 0.0 to 1.0.",
+        )
+        price_score: float = Field(
+            default=0.2,
+            description="Relative importance of price fit from 0.0 to 1.0.",
+        )
+
+
     class ApartmentPreferences(BaseModel):
         min_bedrooms: int | None = Field(default=None, description="Minimum number of bedrooms")
         min_bathrooms: float | None = Field(default=None, description="Minimum number of bathrooms")
+        price_floor: float | None = Field(
+            default=None,
+            description="Minimum acceptable nightly or monthly price when the user asks for at least a certain price point.",
+        )
         max_price: float | None = Field(default=None, description="Maximum price or budget")
         target_price: float | None = Field(
             default=None,
@@ -52,6 +82,10 @@ if HAS_LLM:
         quiet_preference: bool = Field(default=False, description="Whether the user prefers a quiet place")
         review_min_rating: float | None = Field(default=None, description="Minimum review rating mentioned")
         room_type: str | None = Field(default=None, description="Room type: 'Entire home/apt' or 'Private room'")
+        priority_weights: PreferenceWeights = Field(
+            default_factory=PreferenceWeights,
+            description="Weighting of review, amenities, purpose, neighborhood, and price based on the user's priorities.",
+        )
 
 
 
@@ -119,6 +153,21 @@ def _extract_budget(query: str) -> float | None:
         r"(?:under|below|max(?:imum)?|up to)\s*\$?(?P<amount>\d[\d,]*)",
         r"budget(?: is| around| of)?\s*\$?(?P<amount>\d[\d,]*)",
         r"\$(?P<amount>\d[\d,]*)\s*(?:max|maximum|budget)?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, query, flags=re.IGNORECASE)
+        if match:
+            return float(match.group("amount").replace(",", ""))
+    return None
+
+
+def _extract_price_floor(query: str) -> float | None:
+    """Extract a minimum acceptable price from user text."""
+
+    patterns = [
+        r"(?:at least|minimum|min(?:imum)? of|starting at|from)\s*\$?(?P<amount>\d[\d,]*)",
+        r"(?:not cheaper than|no cheaper than|not below|above|over|more than)\s*\$?(?P<amount>\d[\d,]*)",
+        r"\$?(?P<amount>\d[\d,]*)\s*(?:minimum|min(?:imum)?|floor)\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, query, flags=re.IGNORECASE)
@@ -341,6 +390,7 @@ def _extract_room_type(query: str) -> str | None:
 def _build_preferences_dict(
     min_bedrooms: int | None,
     min_bathrooms: float | None,
+    price_floor: float | None,
     max_price: float | None,
     target_price: float | None,
     price_period: Literal["nightly", "monthly"],
@@ -354,11 +404,14 @@ def _build_preferences_dict(
     quiet_preference: bool,
     review_min_rating: float | None,
     room_type: str | None,
+    priority_weights: dict[str, float] | None = None,
     price_preference: Literal["cheap", "expensive", "moderate", "none"] = "none",
 ) -> dict[str, Any]:
+    normalized_priority_weights = _normalize_priority_weights(priority_weights)
     raw_preferences = {
         "min_bedrooms": min_bedrooms,
         "min_bathrooms": min_bathrooms,
+        "price_floor": price_floor,
         "max_price": max_price,
         "target_price": target_price,
         "price_period": price_period,
@@ -373,6 +426,7 @@ def _build_preferences_dict(
         "quiet_preference": quiet_preference,
         "review_min_rating": review_min_rating,
         "room_type": room_type,
+        "priority_weights": normalized_priority_weights,
     }
 
     hard_constraints = {
@@ -398,7 +452,9 @@ def _build_preferences_dict(
         "food_scene_priority": food_scene_priority,
         "quiet_preference": quiet_preference,
         "review_min_rating": review_min_rating,
+        "price_floor": price_floor,
         "target_price": target_price,
+        "priority_weights": normalized_priority_weights,
         "amenity_strictness": 1.0,
         "expanded_neighborhood_search": False,
     }
@@ -420,6 +476,18 @@ def _build_preferences_dict(
             "kind": "soft",
             "can_relax": bool(desired_amenities),
             "requires_user_confirmation": False,
+        },
+        "target_price": {
+            "kind": "semi_hard",
+            "can_relax": target_price is not None,
+            "requires_user_confirmation": target_price is not None,
+            "suggested_increase_pct": 0.5,
+        },
+        "price_floor": {
+            "kind": "semi_hard",
+            "can_relax": price_floor is not None,
+            "requires_user_confirmation": price_floor is not None,
+            "suggested_decrease_pct": 0.15,
         },
         "min_bedrooms": {
             "kind": "semi_hard",
@@ -476,11 +544,53 @@ def _extract_price_preference(query: str) -> Literal["cheap", "expensive", "mode
     return "none"
 
 
+def _normalize_priority_weights(priority_weights: dict[str, Any] | None) -> dict[str, float]:
+    """Normalize user-priority weights so they sum to 1.0."""
+
+    default_weights = {
+        "review_rating": 0.2,
+        "amenity_match": 0.2,
+        "purpose_alignment": 0.2,
+        "neighborhood_fit": 0.2,
+        "price_score": 0.2,
+    }
+    if not priority_weights:
+        return default_weights
+
+    cleaned: dict[str, float] = {}
+    total = 0.0
+    for key in default_weights:
+        raw_value = priority_weights.get(key, default_weights[key])
+        try:
+            numeric = max(float(raw_value), 0.0)
+        except (TypeError, ValueError):
+            numeric = default_weights[key]
+        cleaned[key] = numeric
+        total += numeric
+
+    if total <= 0:
+        return default_weights
+
+    return {key: round(value / total, 4) for key, value in cleaned.items()}
+
+
+def _require_llm_parser() -> None:
+    """Ensure the OpenAI-backed parser is available."""
+
+    if not HAS_LLM or ChatOpenAI is None or BaseModel is None or Field is None:
+        raise RuntimeError(
+            "OpenAI-backed parsing requires langchain_openai and pydantic to be installed."
+        )
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY is required because rule-based parsing has been removed.")
+
+
 def parse_preferences_rule_based(user_query: str) -> dict[str, Any]:
     """Parse a query into hard and soft preferences without an LLM."""
 
     min_bedrooms = _extract_bedrooms(user_query)
     min_bathrooms = _extract_bathrooms(user_query)
+    price_floor = _extract_price_floor(user_query)
     max_price = _extract_budget(user_query)
     target_price = _extract_target_price(user_query, explicit_budget=max_price)
     price_period = _extract_price_period(user_query, has_explicit_budget=max_price is not None)
@@ -499,6 +609,7 @@ def parse_preferences_rule_based(user_query: str) -> dict[str, Any]:
     return _build_preferences_dict(
         min_bedrooms=min_bedrooms,
         min_bathrooms=min_bathrooms,
+        price_floor=price_floor,
         max_price=max_price,
         target_price=target_price,
         price_period=price_period,
@@ -512,14 +623,15 @@ def parse_preferences_rule_based(user_query: str) -> dict[str, Any]:
         quiet_preference=quiet_preference,
         review_min_rating=review_min_rating,
         room_type=room_type,
+        priority_weights=None,
         price_preference=price_preference,
     )
 
 
-def extract_preferences_llm(user_query: str) -> dict[str, Any] | None:
+def extract_preferences_llm(user_query: str) -> dict[str, Any]:
     """Extract preferences using a structured LLM output."""
-    if not HAS_LLM or not os.environ.get("OPENAI_API_KEY"):
-        return None
+
+    _require_llm_parser()
 
     try:
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
@@ -528,10 +640,11 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any] | None:
         prompt = (
             "Extract user apartment leasing parameters from this query:\\n\\n{query}\\n\\n"
             "CRITICAL INSTRUCTION FOR PRICE TYPE:\\n"
-            "Distinguish a hard ceiling budget from a target price.\\n"
+            "Distinguish a hard floor, hard ceiling budget, and target price.\\n"
+            " - Put values like 'at least $200', 'minimum $200', '$200 minimum', or 'not cheaper than $200' into price_floor.\\n"
             " - Put values like 'under $200', '$200 max', 'budget is $200', or 'up to $200' into max_price.\\n"
             " - Put values like '$200 place', 'around $200', or 'about $200 a night' into target_price instead.\\n"
-            " - Do not fill both max_price and target_price unless the user clearly expresses both.\\n\\n"
+            " - Do not fill all of price_floor, max_price, and target_price unless the user clearly expresses all of them.\\n\\n"
             "CRITICAL INSTRUCTION FOR PRICE PERIOD:\\n"
             "If the user mentions a price or budget without saying monthly/per month, default the price period to nightly.\\n"
             "Only use 'monthly' when the query explicitly says monthly/per month/month rent.\\n\\n"
@@ -542,6 +655,16 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any] | None:
             " - Use 'expensive' if the user mentions ANY of: expensive, luxury, high-end, premium, pricey, upscale, lavish, etc.\\n"
             " - Use 'moderate' for mid-range or reasonably priced.\\n"
             " - Use 'none' only if no price-related quality is mentioned.\\n\\n"
+            "CRITICAL INSTRUCTION FOR PRIORITY WEIGHTS:\\n"
+            "Infer how important each scoring dimension is from the user's wording and emphasis.\\n"
+            "You must set priority_weights across review_rating, amenity_match, purpose_alignment, neighborhood_fit, and price_score.\\n"
+            "The weights do not need to sum perfectly because the code will normalize them, but they should reflect relative importance.\\n"
+            "Examples:\\n"
+            " - If the user emphasizes commute, subway access, neighborhood, or nearby lifestyle, increase neighborhood_fit.\\n"
+            " - If the user emphasizes budget, affordability, or exact price targets, increase price_score.\\n"
+            " - If the user emphasizes remote work, quietness, or how they will use the space, increase purpose_alignment.\\n"
+            " - If the user emphasizes specific amenities, increase amenity_match.\\n"
+            " - If the user emphasizes ratings or trust, increase review_rating.\\n\\n"
             "COMMUTE, TRANSIT, AND LIFESTYLE INSTRUCTIONS:\\n"
             " - If the user says they work in a place, study at a school, or commute to an area, add that place or school to commute_destinations.\\n"
             " - If the user mentions subway access, public transit, easy commuting, or has commute destinations, set transit_priority to true.\\n"
@@ -551,10 +674,16 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any] | None:
         ).format(query=user_query)
         
         result = structured_llm.invoke(prompt)
+        priority_weights = (
+            result.priority_weights.model_dump()
+            if hasattr(result.priority_weights, "model_dump")
+            else result.priority_weights.dict()
+        )
         
         return _build_preferences_dict(
             min_bedrooms=result.min_bedrooms,
             min_bathrooms=result.min_bathrooms,
+            price_floor=result.price_floor,
             max_price=result.max_price,
             target_price=result.target_price,
             price_period=result.price_period,
@@ -569,17 +698,13 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any] | None:
             quiet_preference=result.quiet_preference,
             review_min_rating=result.review_min_rating,
             room_type=result.room_type,
+            priority_weights=priority_weights,
         )
     except Exception as e:
-        print(f"Warning: LLM pref parser failed: {e}")
-        return None
+        raise RuntimeError(f"OpenAI-backed preference parsing failed: {e}") from e
 
 
 def parse_preferences(user_query: str) -> dict[str, Any]:
-    """Public parsing interface with an optional LLM integration hook."""
+    """Public parsing interface backed only by the LLM parser."""
 
-    llm_result = extract_preferences_llm(user_query)
-    if llm_result is not None:
-        return llm_result
-
-    return parse_preferences_rule_based(user_query)
+    return extract_preferences_llm(user_query)

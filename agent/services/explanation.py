@@ -12,10 +12,20 @@ except ImportError:
     ChatOpenAI = None
     PromptTemplate = None
 
+
+def _require_llm_rewrite() -> None:
+    """Ensure the OpenAI-backed explanation rewrite is available."""
+
+    if ChatOpenAI is None or PromptTemplate is None:
+        raise RuntimeError("OpenAI-backed explanation rewriting requires langchain_openai and langchain_core.")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY is required because non-LLM explanation fallback has been removed.")
+
+
 def _rewrite_with_llm(draft: str) -> str:
     """Use an LLM to rewrite the deterministic draft."""
-    if ChatOpenAI is None or PromptTemplate is None or not os.environ.get("OPENAI_API_KEY"):
-        return draft
+
+    _require_llm_rewrite()
     
     try:
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
@@ -32,8 +42,7 @@ def _rewrite_with_llm(draft: str) -> str:
         result = chain.invoke({"draft": draft})
         return result.content.strip()
     except Exception as e:
-        print(f"Warning: LLM rewrite failed: {e}")
-        return draft
+        raise RuntimeError(f"OpenAI-backed explanation rewriting failed: {e}") from e
 
 
 def _describe_top_strengths(score_breakdown: dict[str, float]) -> list[str]:
