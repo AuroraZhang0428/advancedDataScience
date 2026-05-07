@@ -150,6 +150,35 @@
         <span class="qs-text" id="querySummaryText"></span>
       </div>
 
+      <!-- Detected Preferences -->
+      <div class="insight-panel" id="preferencesPanel" style="display:none">
+        <div class="panel-header">
+          <div class="panel-icon">🧠</div>
+          <div>
+            <h3>Detected Preferences</h3>
+            <p>What the agent understood from your request</p>
+          </div>
+        </div>
+        <div class="preferences-grid" id="preferencesGrid"></div>
+      </div>
+
+      <!-- Agent Process -->
+      <div class="insight-panel" id="agentTracePanel" style="display:none">
+        <div class="panel-header">
+          <div class="panel-icon">⚙️</div>
+          <div>
+            <h3>Agent Process</h3>
+            <p>How the agent parsed, filtered, adapted, and finalized the search</p>
+          </div>
+        </div>
+        <div class="agent-trace-list" id="agentTraceList"></div>
+      </div>
+
+      <!-- Prototype Note -->
+      <div class="prototype-note">
+        This prototype uses historical NYC listing data. Active booking links are not included, so NestAI focuses on recommendation reasoning, comparison, and explanation.
+      </div>
+
       <!-- Results Grid -->
       <div class="cards-grid" id="cardsGrid"></div>
     </div>

@@ -5,6 +5,7 @@
   const API = "";
   let savedApiKey = "";
   let savedDataset = "matched_subset_dataset.csv";
+  let lastBaseQuery = "";
 
   /* ── DOM refs ── */
   const $ = (s) => document.getElementById(s);
@@ -22,6 +23,10 @@
   const questionBanner = $("questionBanner");
   const questionText = $("questionText");
   const querySummaryText = $("querySummaryText");
+  const preferencesPanel = $("preferencesPanel");
+  const preferencesGrid = $("preferencesGrid");
+  const agentTracePanel = $("agentTracePanel");
+  const agentTraceList = $("agentTraceList");
   const loadingOverlay = $("loadingOverlay");
   const errorToast = $("errorToast");
   const errorMessage = $("errorMessage");
@@ -64,6 +69,7 @@
   async function doSearch() {
     const query = queryInput.value.trim();
     if (!query) return;
+    lastBaseQuery = query;
 
     setLoading(true);
     resultsSection.style.display = "none";
@@ -107,6 +113,14 @@
     } finally {
       setLoading(false);
     }
+  }
+
+  async function searchWithFeedback(feedback) {
+    const originalQuery = lastBaseQuery || querySummaryText.textContent || queryInput.value.trim();
+    const revisedQuery = `${originalQuery}. User feedback: ${feedback}`;
+    queryInput.value = revisedQuery;
+    closeModal();
+    await doSearch();
   }
 
   /* ── Loading ── */
@@ -171,6 +185,8 @@
     questionBanner.style.display = "none";
 
     querySummaryText.textContent = query;
+    renderDetectedPreferences(data.detected_preferences);
+    renderAgentTrace(data.agent_trace);
     cardsGrid.innerHTML = "";
 
     // ── Clarification card (inline, above results) ──────────────────────────
@@ -186,6 +202,100 @@
 
     resultsSection.style.display = "block";
     resultsSection.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function renderDetectedPreferences(prefs) {
+    const items = buildPreferenceItems(prefs);
+    if (!items.length) {
+      preferencesPanel.style.display = "none";
+      preferencesGrid.innerHTML = "";
+      return;
+    }
+
+    preferencesGrid.innerHTML = items
+      .map(([label, value]) => `
+        <div class="preference-chip">
+          <span>${esc(label)}</span>
+          <strong>${esc(value)}</strong>
+        </div>
+      `)
+      .join("");
+
+    preferencesPanel.style.display = "block";
+  }
+
+  function buildPreferenceItems(prefs) {
+    if (!prefs) return [];
+    const hard = prefs.hard_constraints || {};
+    const soft = prefs.soft_preferences || {};
+    const raw = prefs.raw_preferences || {};
+    const items = [];
+
+    const firstValue = (...values) => values.find((v) => {
+      if (Array.isArray(v)) return v.length;
+      return v !== undefined && v !== null && v !== "";
+    });
+
+    const maxPrice = firstValue(hard.max_price, soft.target_price, raw.max_price, raw.budget);
+    if (maxPrice) items.push(["Budget", typeof maxPrice === "number" ? `$${maxPrice} max` : maxPrice]);
+
+    const bedrooms = firstValue(hard.min_bedrooms, raw.min_bedrooms, raw.bedrooms);
+    if (bedrooms !== undefined && bedrooms !== null && bedrooms !== "") items.push(["Bedrooms", `${bedrooms}+`]);
+
+    const bathrooms = firstValue(hard.min_bathrooms, raw.min_bathrooms, raw.bathrooms);
+    if (bathrooms !== undefined && bathrooms !== null && bathrooms !== "") items.push(["Bathrooms", `${bathrooms}+`]);
+
+    const neighborhoods = firstValue(
+      hard.neighborhoods,
+      soft.preferred_neighborhoods,
+      soft.neighborhoods,
+      raw.preferred_neighborhoods,
+      raw.neighborhoods
+    );
+    if (neighborhoods) items.push(["Location", formatValue(neighborhoods)]);
+
+    const amenities = firstValue(soft.desired_amenities, soft.amenities, raw.desired_amenities, raw.amenities);
+    if (amenities) items.push(["Amenities", formatValue(amenities)]);
+
+    const priorities = firstValue(soft.priorities, raw.priorities, raw.preferences, raw.purpose_tags);
+    if (priorities) items.push(["Priorities", formatValue(priorities)]);
+
+    const roomType = firstValue(hard.room_type, raw.room_type);
+    if (roomType) items.push(["Room Type", formatValue(roomType)]);
+
+    return items.slice(0, 8);
+  }
+
+  function renderAgentTrace(trace) {
+    if (!Array.isArray(trace) || !trace.length) {
+      agentTracePanel.style.display = "none";
+      agentTraceList.innerHTML = "";
+      return;
+    }
+
+    agentTraceList.innerHTML = trace
+      .map((item, idx) => `
+        <div class="trace-step">
+          <div class="trace-number">${idx + 1}</div>
+          <div class="trace-copy">
+            <strong>${esc(item.step)}</strong>
+            <p>${esc(item.detail)}</p>
+          </div>
+        </div>
+      `)
+      .join("");
+
+    agentTracePanel.style.display = "block";
+  }
+
+  function formatValue(value) {
+    if (Array.isArray(value)) return value.join(", ");
+    if (value && typeof value === "object") {
+      return Object.entries(value)
+        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`)
+        .join("; ");
+    }
+    return String(value);
   }
 
   /* ── Clarification Card ── */
@@ -318,7 +428,21 @@
         ${tagsHTML ? `<div class="modal-section"><h4>Amenities & Tags</h4><div class="tags-row">${tagsHTML}</div></div>` : ""}
 
         ${rec.llm_rank_reason ? `<div class="modal-section"><h4>AI Ranking Reason</h4><p style="font-size:.85rem;color:var(--text-muted)">${esc(rec.llm_rank_reason)}</p></div>` : ""}
+
+        <div class="feedback-box">
+          <h4>Not quite right?</h4>
+          <p>Give the agent feedback and it will rethink the recommendation.</p>
+          <div class="feedback-actions">
+            <button class="feedback-btn" data-feedback="These options are too expensive. Please find cheaper listings and prioritize price more.">Too expensive</button>
+            <button class="feedback-btn" data-feedback="I want a better location or closer transit access. Please prioritize location more.">Better location</button>
+            <button class="feedback-btn" data-feedback="I care more about review quality and overall comfort. Please prioritize higher-rated listings.">Better reviews</button>
+          </div>
+        </div>
       </div>`;
+
+    modalContent.querySelectorAll(".feedback-btn").forEach((btn) => {
+      btn.addEventListener("click", () => searchWithFeedback(btn.dataset.feedback));
+    });
 
     modalOverlay.style.display = "flex";
     document.body.style.overflow = "hidden";
@@ -340,6 +464,8 @@
   /* ── New Search ── */
   $("newSearchBtn").addEventListener("click", () => {
     resultsSection.style.display = "none";
+    if (preferencesPanel) preferencesPanel.style.display = "none";
+    if (agentTracePanel) agentTracePanel.style.display = "none";
     window.scrollTo({ top: 0, behavior: "smooth" });
     queryInput.focus();
   });
