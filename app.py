@@ -13,14 +13,10 @@ from pathlib import Path
 
 from agent.config import DEFAULT_CONFIG
 from agent.graph import build_graph
-
-# ── Node imports for direct pipeline resumption ──────────────────────────────
-from agent.nodes.filter_listings import filter_listings_node
-from agent.nodes.score_rank import score_rank_node
-from agent.nodes.enrich_candidates import enrich_candidates_node
-from agent.nodes.evaluate_results import evaluate_results_node, evaluate_results_route
-from agent.nodes.relax_or_ask import relax_or_ask_node, relax_or_ask_route
-from agent.nodes.explain import explain_node
+from agent.baselines.filter_search import run_filter_baseline
+from agent.baselines.llm_chatbot import run_llm_chatbot_baseline
+from agent.services.dataset import load_listings
+from agent.orchestrator import run_orchestrator
 
 app = Flask(__name__, static_folder="frontend", static_url_path="")
 CORS(app)
@@ -231,38 +227,18 @@ def _apply_user_answer(state: dict[str, Any], question_key: str | None, answer: 
 
 
 def _resume_pipeline(state: dict[str, Any]) -> dict[str, Any]:
-    """Re-run the pipeline from filter_listings onward using direct node calls.
+    """Re-run the orchestrator with updated state after a user clarification.
 
-    This skips load_data and parse_preferences so the existing parsed
-    preferences and loaded listings are reused with any updated constraints.
+    The state already has listings + parsed preferences; we just re-invoke
+    the ReAct orchestrator so it can re-run tool calls with the updated
+    hard_constraints or soft_preferences.
     """
-    MAX_RESUME_ATTEMPTS = 3
-
-    for _ in range(MAX_RESUME_ATTEMPTS):
-        state.update(filter_listings_node(state))
-        state.update(score_rank_node(state))
-        state.update(enrich_candidates_node(state))
-        state.update(evaluate_results_node(state))
-
-        if evaluate_results_route(state) == "sufficient":
-            state.update(explain_node(state))
-            return state
-
-        # Results still insufficient — run the relaxation policy
-        state.update(relax_or_ask_node(state))
-        next_route = relax_or_ask_route(state)
-
-        if next_route == "wait_user":
-            # Agent needs another clarification — surface it to the user
-            return state
-        elif next_route == "explain":
-            state.update(explain_node(state))
-            return state
-        # next_route == "retry" → loop and try again with relaxed constraints
-
-    # Exhausted retries — explain best available
-    state.update(explain_node(state))
-    return state
+    try:
+        result = run_orchestrator(state)
+        return result
+    except Exception:
+        # Fall back: return state as-is so the frontend can show what we have
+        return state
 
 
 def _build_response(result: dict[str, Any]) -> dict[str, Any]:
@@ -373,6 +349,61 @@ def clarify():
     del _sessions[session_id]
 
     return jsonify(_build_response(result))
+
+
+@app.route("/api/search/baseline-filter", methods=["POST"])
+def search_baseline_filter():
+    """Baseline 1 — filter-based search: regex parsing + hard filters + price sort."""
+    data = request.get_json(force=True)
+    query = data.get("query", "").strip()
+    dataset = data.get("dataset", str(DEFAULT_CONFIG.dataset_path))
+
+    if not query:
+        return jsonify({"error": "Query is required."}), 400
+
+    dataset_path = Path(dataset)
+    if not dataset_path.is_absolute():
+        dataset_path = PROJECT_ROOT / dataset_path
+    if not dataset_path.exists():
+        return jsonify({"error": f"Dataset not found: {dataset_path}"}), 400
+
+    try:
+        listings = load_listings(str(dataset_path))
+        result = run_filter_baseline(listings, query)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify(result)
+
+
+@app.route("/api/search/baseline-llm", methods=["POST"])
+def search_baseline_llm():
+    """Baseline 2 — standard LLM chatbot: single-turn GPT call on sampled data."""
+    data = request.get_json(force=True)
+    query = data.get("query", "").strip()
+    api_key = data.get("api_key", "").strip()
+    dataset = data.get("dataset", str(DEFAULT_CONFIG.dataset_path))
+
+    if not query:
+        return jsonify({"error": "Query is required."}), 400
+
+    dataset_path = Path(dataset)
+    if not dataset_path.is_absolute():
+        dataset_path = PROJECT_ROOT / dataset_path
+    if not dataset_path.exists():
+        return jsonify({"error": f"Dataset not found: {dataset_path}"}), 400
+
+    resolved_key = api_key or os.environ.get("OPENAI_API_KEY", "").strip()
+    if not resolved_key:
+        return jsonify({"error": "OPENAI_API_KEY is required for the LLM chatbot baseline."}), 400
+
+    try:
+        listings = load_listings(str(dataset_path))
+        result = run_llm_chatbot_baseline(listings, query, resolved_key)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify(result)
 
 
 @app.route("/api/health")

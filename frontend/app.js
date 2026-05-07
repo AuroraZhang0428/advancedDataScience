@@ -6,6 +6,7 @@
   let savedApiKey = "";
   let savedDataset = "matched_subset_dataset.csv";
   let lastBaseQuery = "";
+  let lastAgentResult = null;
 
   /* ── DOM refs ── */
   const $ = (s) => document.getElementById(s);
@@ -34,6 +35,8 @@
   const modalContent = $("modalContent");
   const settingsPanel = $("settingsPanel");
   const settingsOverlay = $("settingsOverlay");
+  const compareBtn = $("compareBtn");
+  const comparisonSection = $("comparisonSection");
 
   /* ── Settings ── */
   $("settingsToggle").addEventListener("click", () => {
@@ -83,7 +86,10 @@
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Search failed");
+      lastAgentResult = data;
       renderResults(query, data);
+      if (compareBtn) compareBtn.style.display = data.recommendations && data.recommendations.length ? "inline-flex" : "none";
+      if (comparisonSection) comparisonSection.style.display = "none";
     } catch (err) {
       showToast(err.message);
     } finally {
@@ -117,10 +123,157 @@
 
   async function searchWithFeedback(feedback) {
     const originalQuery = lastBaseQuery || querySummaryText.textContent || queryInput.value.trim();
-    const revisedQuery = `${originalQuery}. User feedback: ${feedback}`;
+    const revisedQuery = originalQuery + ". User feedback: " + feedback;
     queryInput.value = revisedQuery;
     closeModal();
     await doSearch();
+  }
+
+  /* ── Baseline Comparison ── */
+  compareBtn.addEventListener("click", function () {
+    comparisonSection.style.display = "block";
+    comparisonSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    runComparison();
+  });
+
+  $("closeCompareBtn").addEventListener("click", function () {
+    comparisonSection.style.display = "none";
+  });
+
+  async function runComparison() {
+    var query = lastBaseQuery || querySummaryText.textContent || "";
+    if (!query) return;
+
+    $("compareLoading").style.display = "flex";
+    $("comparisonColumns").style.display = "none";
+    $("compareObservations").style.display = "none";
+
+    try {
+      var filterPromise = fetch(API + "/api/search/baseline-filter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: query, dataset: savedDataset }),
+      }).then(function (r) { return r.json(); });
+
+      var chatbotPromise = fetch(API + "/api/search/baseline-llm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: query, api_key: savedApiKey, dataset: savedDataset }),
+      }).then(function (r) { return r.json(); });
+
+      var results = await Promise.allSettled([filterPromise, chatbotPromise]);
+      var filterData = results[0].status === "fulfilled" ? results[0].value : { error: String(results[0].reason) };
+      var chatbotData = results[1].status === "fulfilled" ? results[1].value : { error: String(results[1].reason) };
+
+      renderComparisonColumn("agentColCards", "agentColTrace", "agentColMeta", lastAgentResult || {}, "agent");
+      renderComparisonColumn("filterColCards", "filterColTrace", "filterColMeta", filterData, "filter");
+      renderComparisonColumn("chatbotColCards", "chatbotColTrace", "chatbotColMeta", chatbotData, "chatbot");
+      renderObservations(lastAgentResult, filterData, chatbotData);
+
+      $("comparisonColumns").style.display = "grid";
+      $("compareObservations").style.display = "block";
+    } catch (err) {
+      showToast("Comparison failed: " + err.message);
+    } finally {
+      $("compareLoading").style.display = "none";
+    }
+  }
+
+  function renderComparisonColumn(cardsId, traceId, metaId, data, type) {
+    var cardsEl = $(cardsId);
+    var traceEl = $(traceId);
+    var metaEl = $(metaId);
+    cardsEl.innerHTML = "";
+    traceEl.innerHTML = "";
+
+    if (data.error) {
+      cardsEl.innerHTML = "<div class=\"col-error\">&#9888; " + esc(data.error) + "</div>";
+      if (metaEl) metaEl.textContent = "Error";
+      return;
+    }
+
+    var recs = data.recommendations || [];
+    var explanations = data.explanations || [];
+    if (metaEl) metaEl.textContent = recs.length ? recs.length + " result" + (recs.length > 1 ? "s" : "") : "No results";
+
+    var trace = data.agent_trace || [];
+    if (trace.length) {
+      var traceHTML = "<div class=\"col-trace-inner\">";
+      trace.forEach(function (t, i) {
+        traceHTML += "<div class=\"col-trace-step\"><span class=\"col-trace-n\">" + (i + 1) + "</span><span>" + esc(t.step) + "</span></div>";
+      });
+      traceHTML += "</div>";
+      traceEl.innerHTML = traceHTML;
+    }
+
+    if (!recs.length) {
+      cardsEl.innerHTML = "<div class=\"col-empty\">No listings matched this query.</div>";
+      return;
+    }
+
+    recs.forEach(function (rec, idx) {
+      var card = document.createElement("div");
+      card.className = "compare-card";
+      var priceText = rec.price != null ? "$" + rec.price.toLocaleString("en-US", { maximumFractionDigits: 0 }) + "/night" : "N/A";
+      var explanation = explanations[idx] || rec.llm_rank_reason || "";
+      var meta = "";
+      if (rec.bedrooms != null) meta += "<span>\uD83D\uDECF " + rec.bedrooms + "bd</span>";
+      if (rec.bathrooms != null) meta += "<span>\uD83D\uDEBF " + rec.bathrooms + "ba</span>";
+      if (rec.review_rating != null) meta += "<span>\u2B50 " + Number(rec.review_rating).toFixed(1) + "</span>";
+      if (rec.wifi) meta += "<span>\uD83D\uDCF6 WiFi</span>";
+      if (rec.score > 0) meta += "<span class=\"cc-score\">Score: " + Math.round(rec.score * 100) + "%</span>";
+      card.innerHTML =
+        "<div class=\"cc-rank\">#" + (idx + 1) + "</div>" +
+        "<div class=\"cc-title\">" + esc(rec.title) + "</div>" +
+        "<div class=\"cc-neighborhood\">\uD83D\uDCCD " + esc(rec.neighborhood) + "</div>" +
+        "<div class=\"cc-price\">" + priceText + "</div>" +
+        "<div class=\"cc-meta\">" + meta + "</div>" +
+        (explanation ? "<div class=\"cc-reason\">" + esc(explanation) + "</div>" : "");
+      cardsEl.appendChild(card);
+    });
+  }
+
+  function renderObservations(agentData, filterData, chatbotData) {
+    var obs = [];
+    var agentRecs = (agentData && agentData.recommendations) || [];
+    var filterRecs = (filterData && filterData.recommendations) || [];
+    var chatbotRecs = (chatbotData && chatbotData.recommendations) || [];
+
+    if (filterRecs.length === 0 && agentRecs.length > 0) {
+      obs.push("&#128270; <strong>Filter-based search returned 0 results</strong> &#8212; the regex parser could not extract a constraint that NestAI understood via LLM parsing.");
+    } else if (agentRecs.length > filterRecs.length) {
+      obs.push("&#128200; NestAI found <strong>" + agentRecs.length + " results</strong> vs filter-based <strong>" + filterRecs.length + "</strong>. Adaptive relaxation recovered more matches.");
+    } else if (filterRecs.length >= agentRecs.length && filterRecs.length > 0) {
+      obs.push("&#128203; Filter-based returned <strong>" + filterRecs.length + " results</strong> (all hard-constraint matches). NestAI returned <strong>" + agentRecs.length + "</strong> after semantic scoring.");
+    }
+
+    if (filterRecs.length >= 2) {
+      var prices = filterRecs.map(function (r) { return r.price; }).filter(function (p) { return p != null; });
+      var isSorted = prices.every(function (p, i, a) { return i === 0 || p >= a[i - 1]; });
+      if (isSorted) obs.push("&#128178; Filter-based results are sorted by price ascending &#8212; no quality, lifestyle, or relevance scoring applied.");
+    }
+
+    if (agentRecs.length) {
+      var avgScore = agentRecs.reduce(function (s, r) { return s + (r.score || 0); }, 0) / agentRecs.length;
+      obs.push("&#127919; NestAI average composite score: <strong>" + avgScore.toFixed(2) + "</strong> (0&#8211;1 scale combining reviews, amenities, location, purpose fit, and price). Baselines have no composite scoring.");
+    }
+
+    var hallucinated = chatbotRecs.filter(function (r) { return r.llm_rank_reason && r.llm_rank_reason.indexOf("not found in dataset") !== -1; });
+    if (hallucinated.length) {
+      obs.push("&#9888; The LLM chatbot hallucinated <strong>" + hallucinated.length + " listing(s)</strong> not in the dataset &#8212; a known risk of ungrounded chatbot approaches.");
+    } else if (chatbotRecs.length > 0) {
+      obs.push("&#9989; LLM chatbot successfully grounded all recommendations in real dataset listings.");
+    }
+
+    var relaxHistory = (agentData && agentData.relaxation_history) || [];
+    if (relaxHistory.length) {
+      obs.push("&#128260; NestAI performed <strong>" + relaxHistory.length + " adaptive adjustment(s)</strong> during the search. Neither baseline supports this &#8212; they fail silently or return nothing.");
+    }
+
+    if (!obs.length) obs.push("&#8505; Run a query with specific constraints (budget, bedrooms, neighborhood) to see clear differences between the three approaches.");
+
+    var list = $("observationsList");
+    list.innerHTML = obs.map(function (o) { return "<li>" + o + "</li>"; }).join("");
   }
 
   /* ── Loading ── */

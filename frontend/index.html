@@ -122,6 +122,7 @@
           </div>
         </div>
         <div class="status-right">
+          <button class="btn-ghost" id="compareBtn" style="display:none">⚖️ Compare Baselines</button>
           <button class="btn-ghost" id="newSearchBtn">New Search</button>
         </div>
       </div>
@@ -181,6 +182,96 @@
 
       <!-- Results Grid -->
       <div class="cards-grid" id="cardsGrid"></div>
+
+      <!-- ── Baseline Comparison Panel ───────────────────────────────── -->
+      <div class="comparison-section" id="comparisonSection" style="display:none">
+        <div class="comparison-header">
+          <div class="comparison-title-block">
+            <span class="comparison-icon">⚖️</span>
+            <div>
+              <h2 class="comparison-title">Baseline Comparison</h2>
+              <p class="comparison-subtitle">Same query — three different approaches</p>
+            </div>
+          </div>
+          <button class="btn-ghost" id="closeCompareBtn">✕ Close</button>
+        </div>
+
+        <!-- Method Legend -->
+        <div class="comparison-legend">
+          <div class="legend-item legend-agent">
+            <span class="legend-dot"></span>
+            <div>
+              <strong>NestAI (Our System)</strong>
+              <p>LangGraph ReAct agent with LLM parsing, multi-step tool use, adaptive constraint relaxation, and semantic scoring.</p>
+            </div>
+          </div>
+          <div class="legend-item legend-filter">
+            <span class="legend-dot"></span>
+            <div>
+              <strong>Filter-Based Search</strong>
+              <p>Regex/keyword parsing + hard filters + price sort ascending. No AI — simulates a basic property portal.</p>
+            </div>
+          </div>
+          <div class="legend-item legend-chatbot">
+            <span class="legend-dot"></span>
+            <div>
+              <strong>Standard LLM Chatbot</strong>
+              <p>Single-turn GPT-4o-mini call with sampled listing context. No tools, no scoring pipeline — simulates pasting into ChatGPT.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Loading state -->
+        <div class="compare-loading" id="compareLoading" style="display:none">
+          <div class="compare-spinner"></div>
+          <span>Running baselines…</span>
+        </div>
+
+        <!-- 3-column comparison grid -->
+        <div class="comparison-columns" id="comparisonColumns" style="display:none">
+          <div class="compare-col" id="colAgent">
+            <div class="col-header col-header-agent">
+              <span class="col-icon">🤖</span>
+              <div>
+                <div class="col-label">NestAI Agent</div>
+                <div class="col-sublabel" id="agentColMeta"></div>
+              </div>
+            </div>
+            <div class="col-trace" id="agentColTrace"></div>
+            <div class="col-cards" id="agentColCards"></div>
+          </div>
+
+          <div class="compare-col" id="colFilter">
+            <div class="col-header col-header-filter">
+              <span class="col-icon">🔍</span>
+              <div>
+                <div class="col-label">Filter-Based Search</div>
+                <div class="col-sublabel" id="filterColMeta"></div>
+              </div>
+            </div>
+            <div class="col-trace" id="filterColTrace"></div>
+            <div class="col-cards" id="filterColCards"></div>
+          </div>
+
+          <div class="compare-col" id="colChatbot">
+            <div class="col-header col-header-chatbot">
+              <span class="col-icon">💬</span>
+              <div>
+                <div class="col-label">LLM Chatbot</div>
+                <div class="col-sublabel" id="chatbotColMeta"></div>
+              </div>
+            </div>
+            <div class="col-trace" id="chatbotColTrace"></div>
+            <div class="col-cards" id="chatbotColCards"></div>
+          </div>
+        </div>
+
+        <!-- Observations panel -->
+        <div class="compare-observations" id="compareObservations" style="display:none">
+          <h3>📊 What to notice</h3>
+          <ul id="observationsList"></ul>
+        </div>
+      </div>
     </div>
   </main>
 
