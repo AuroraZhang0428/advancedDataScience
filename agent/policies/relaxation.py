@@ -461,6 +461,15 @@ def _choose_relaxation_action_rule_based(state: dict[str, Any]) -> RelaxationDec
 
 
 def choose_relaxation_action(state: dict[str, Any]) -> RelaxationDecision:
-    """Choose the next relaxation step using only the LLM policy."""
+    """Choose the next relaxation step.
 
-    return _choose_relaxation_action_llm(state)
+    Uses the LLM policy when an OpenAI API key is available; falls back to the
+    deterministic rule-based policy so the pipeline always completes.
+    """
+
+    if _llm_is_available():
+        try:
+            return _choose_relaxation_action_llm(state)
+        except Exception:
+            pass  # fall through to rule-based
+    return _choose_relaxation_action_rule_based(state)

@@ -705,6 +705,15 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any]:
 
 
 def parse_preferences(user_query: str) -> dict[str, Any]:
-    """Public parsing interface backed only by the LLM parser."""
+    """Public parsing interface.
 
-    return extract_preferences_llm(user_query)
+    Uses the LLM-backed parser when an OpenAI API key is available; falls back
+    to the deterministic rule-based parser otherwise so searches always work.
+    """
+
+    if HAS_LLM and os.environ.get("OPENAI_API_KEY"):
+        try:
+            return extract_preferences_llm(user_query)
+        except Exception:
+            pass  # fall through to rule-based
+    return parse_preferences_rule_based(user_query)

@@ -219,9 +219,15 @@ def generate_listing_explanation(
     if host_name:
         facts.append(f"Search tip: look up the listing title together with host {host_name} to find the exact Airbnb more easily.")
 
-    # Rewrite the deterministic draft into a more polished narrative using an LLM.
+    # Rewrite the deterministic draft into a more polished narrative using an LLM
+    # only when an API key is available; otherwise return the deterministic draft.
     draft_explanation = " ".join(facts)
-    return _rewrite_with_llm(draft_explanation)
+    if os.environ.get("OPENAI_API_KEY"):
+        try:
+            return _rewrite_with_llm(draft_explanation)
+        except Exception:
+            pass  # fall back to plain deterministic text
+    return draft_explanation
 
 
 def generate_final_output(

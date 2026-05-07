@@ -537,12 +537,27 @@ def enrich_and_rerank_listings(
     soft_preferences: dict[str, Any],
     hard_constraints: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Run Google Maps enrichment followed by stage-two LLM balancing."""
+    """Run Google Maps enrichment followed by stage-two LLM balancing.
+
+    When neither GOOGLE_MAPS_API_KEY nor OPENAI_API_KEY are available the
+    function skips all external calls and returns the listings sorted by their
+    existing deterministic score so the pipeline always produces results.
+    """
 
     if not listings:
         return [], {"google_maps_used": False, "reason": "no_shortlisted_listings"}
 
-    _require_google_maps()
+    # ── Skip enrichment when Google Maps key is absent ──────────────────────
+    if not google_maps_available():
+        sorted_listings = sorted(
+            listings,
+            key=lambda item: float(item.get("score", 0.0)),
+            reverse=True,
+        )
+        return sorted_listings, {
+            "google_maps_used": False,
+            "reason": "GOOGLE_MAPS_API_KEY not set — using deterministic score order",
+        }
 
     commute_destinations = [
         str(item).strip()
@@ -564,19 +579,26 @@ def enrich_and_rerank_listings(
 
     enriched_listings.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
 
-    llm_reranked = _rerank_enriched_with_llm(
-        listings=enriched_listings,
-        soft_preferences=soft_preferences,
-        hard_constraints=hard_constraints,
-    )
-    final_ranked = llm_reranked
-    final_ranked.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    # ── Stage-two LLM reranking (optional) ──────────────────────────────────
+    if _llm_is_available():
+        try:
+            llm_reranked = _rerank_enriched_with_llm(
+                listings=enriched_listings,
+                soft_preferences=soft_preferences,
+                hard_constraints=hard_constraints,
+            )
+            enriched_listings = llm_reranked
+        except Exception:
+            pass  # fall back to deterministic sort already applied above
+
+    enriched_listings.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
 
     diagnostics = {
         "google_maps_used": True,
         "resolved_commute_destinations": [item["name"] for item in resolved_destinations],
         "warnings": warnings,
         "listing_count_enriched": len(enriched_listings),
-        "stage_two_llm_used": True,
+        "stage_two_llm_used": _llm_is_available(),
     }
-    return final_ranked, diagnostics
+    return enriched_listings, diagnostics
+

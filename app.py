@@ -7,12 +7,15 @@ from typing import Any
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from pathlib import Path
 
 from agent.config import DEFAULT_CONFIG
 from agent.graph import build_graph
 
 app = Flask(__name__, static_folder="frontend", static_url_path="")
 CORS(app)
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 # Build the graph once at startup
 _graph = None
@@ -70,6 +73,14 @@ def search():
     if not query:
         return jsonify({"error": "Query is required."}), 400
 
+    # Resolve dataset path relative to project root so relative paths like
+    # "matched_subset_dataset.csv" always point to the right file.
+    dataset_path = Path(dataset)
+    if not dataset_path.is_absolute():
+        dataset_path = PROJECT_ROOT / dataset_path
+    if not dataset_path.exists():
+        return jsonify({"error": f"Dataset not found: {dataset_path}"}), 400
+
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
     elif "OPENAI_API_KEY" not in os.environ:
@@ -80,7 +91,7 @@ def search():
         result = graph.invoke(
             {
                 "user_query": query,
-                "dataset_path": dataset,
+                "dataset_path": str(dataset_path),
             }
         )
     except Exception as exc:

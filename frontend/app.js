@@ -4,7 +4,7 @@
 
   const API = "";
   let savedApiKey = "";
-  let savedDataset = "listings.csv";
+  let savedDataset = "matched_subset_dataset.csv";
 
   /* ── DOM refs ── */
   const $ = (s) => document.getElementById(s);
@@ -155,39 +155,46 @@
     el.className = "listing-card";
     const score = rec.score || 0;
     const pct = Math.round(score * 100);
-    const circumference = 2 * Math.PI * 17;
-    const offset = circumference - (score * circumference);
+    const r = 9; // radius for small 26px svg
+    const circ = 2 * Math.PI * r;
+    const offset = circ - (score * circ);
     const scoreColor = score >= 0.7 ? "var(--green)" : score >= 0.5 ? "var(--amber)" : "var(--red)";
     const priceText = rec.price != null ? `$${rec.price.toLocaleString("en-US", { maximumFractionDigits: 0 })}` : "N/A";
+    const cx = 13, cy = 13; // centre of 26px viewBox
 
     el.innerHTML = `
-      <div class="card-rank">${idx + 1}</div>
-      <div class="card-score-ring">
-        <svg class="score-circle" viewBox="0 0 44 44">
-          <circle class="score-bg" cx="22" cy="22" r="17"/>
-          <circle class="score-fg" cx="22" cy="22" r="17"
-            stroke="${scoreColor}"
-            stroke-dasharray="${circumference}"
-            stroke-dashoffset="${offset}"
-            transform="rotate(-90 22 22)"/>
-          <text class="score-text" x="22" y="25" text-anchor="middle">${pct}%</text>
-        </svg>
+      <div class="card-header">
+        <div class="card-rank-badge">${idx + 1}</div>
+        <span class="card-neighborhood-inline">📍 ${esc(rec.neighborhood)}</span>
+        <div class="card-score-pill">
+          <svg class="score-circle" viewBox="0 0 26 26">
+            <circle class="score-bg" cx="${cx}" cy="${cy}" r="${r}"/>
+            <circle class="score-fg" cx="${cx}" cy="${cy}" r="${r}"
+              stroke="${scoreColor}"
+              stroke-dasharray="${circ.toFixed(2)}"
+              stroke-dashoffset="${offset.toFixed(2)}"
+              transform="rotate(-90 ${cx} ${cy})"/>
+          </svg>
+          <span class="score-num" style="color:${scoreColor}">${pct}%</span>
+        </div>
       </div>
       <div class="card-body">
         <div class="card-title">${esc(rec.title)}</div>
-        <div class="card-neighborhood">📍 ${esc(rec.neighborhood)}</div>
         <div class="card-details">
           ${rec.bedrooms != null ? `<span class="detail-tag">🛏 ${rec.bedrooms} bed</span>` : ""}
           ${rec.bathrooms != null ? `<span class="detail-tag">🚿 ${rec.bathrooms} bath</span>` : ""}
           ${rec.review_rating != null ? `<span class="detail-tag">⭐ ${Number(rec.review_rating).toFixed(1)}</span>` : ""}
           ${rec.wifi ? `<span class="detail-tag">📶 WiFi</span>` : ""}
-          ${rec.workspace ? `<span class="detail-tag">💻 Workspace</span>` : ""}
+          ${rec.workspace ? `<span class="detail-tag">💻 Desk</span>` : ""}
         </div>
-        <div class="card-price">${priceText}<span class="card-price-label"> /night</span></div>
+        <div class="card-price-row">
+          <span class="card-price">${priceText}</span>
+          <span class="card-price-label">/night</span>
+        </div>
       </div>
       <div class="card-footer">
         <span class="card-footer-label">AI Match</span>
-        <span class="card-footer-action">View Details <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></span>
+        <span class="card-footer-action">View Details <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
       </div>`;
 
     el.addEventListener("click", () => openModal(rec, idx, explanation));
@@ -195,6 +202,7 @@
   }
 
   /* ── Modal ── */
+
   function openModal(rec, idx, explanation) {
     const priceText = rec.price != null ? `$${rec.price.toLocaleString("en-US", { maximumFractionDigits: 0 })}` : "N/A";
     const bd = rec.score_breakdown || {};

@@ -564,20 +564,28 @@ def rank_listings(
     else:
         shortlist = scored[:shortlist_size]
 
-    llm_reranked = _rerank_with_llm(
-        candidates=shortlist,
-        soft_preferences=soft_preferences,
-        hard_constraints=hard_constraints,
-    )
-    llm_reranked.sort(
-        key=lambda item: (
-            item.get("score", 0.0),
-            item.get("llm_fit_score", 0.0),
-            item.get("coarse_score", 0.0),
-        ),
-        reverse=True,
-    )
-    return llm_reranked
+    # ── Optional LLM reranking ───────────────────────────────────────────────
+    if _llm_is_available():
+        try:
+            llm_reranked = _rerank_with_llm(
+                candidates=shortlist,
+                soft_preferences=soft_preferences,
+                hard_constraints=hard_constraints,
+            )
+            llm_reranked.sort(
+                key=lambda item: (
+                    item.get("score", 0.0),
+                    item.get("llm_fit_score", 0.0),
+                    item.get("coarse_score", 0.0),
+                ),
+                reverse=True,
+            )
+            return llm_reranked
+        except Exception:
+            pass  # fall through to deterministic sort below
+
+    return shortlist
+
 
 
 def count_good_results(scored_listings: list[dict[str, Any]], threshold: float) -> int:
