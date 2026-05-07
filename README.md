@@ -1,212 +1,241 @@
-# LangGraph Apartment Recommendation Agent
+# NestAI — Smart Apartment Finder
 
-This project is a stateful apartment recommendation agent built with LangGraph, OpenAI, and Google Maps Platform.
+A stateful, AI-powered apartment recommendation agent built with **LangGraph**, **Flask**, and a clean web frontend. Describe what you're looking for in plain English and the agent parses your preferences, filters thousands of NYC listings, scores and ranks them, and returns top picks with explanations.
 
-It takes a natural-language housing query, uses an LLM to interpret the user's intent, retrieves and ranks candidate listings, enriches them with live geographic context, and returns final recommendations with explanations.
+> **Works without any API keys.** All LLM and Google Maps calls are optional — the system falls back to fully deterministic rule-based parsing, scoring, and explanations when no keys are configured.
 
-## Current State
+---
 
-The current system is an LLM-driven hybrid pipeline:
+## Quick Start
 
-- LLM-only query parsing
-- deterministic hard filtering
-- deterministic shortlist retrieval scoring
-- LLM stage-one ranking over the shortlist
-- Google Maps live enrichment
-- LLM stage-two reranking using live transit / food / grocery / commute evidence
-- LLM-driven relaxation or clarification decisions
-- LLM-written final explanations
+### Prerequisites
 
-Non-LLM runtime fallbacks have been removed. The demo now expects:
+| Requirement | Version |
+|---|---|
+| Python | 3.11 or higher |
+| [uv](https://docs.astral.sh/uv/) *(recommended)* or pip | latest |
+| Git | any |
 
-- `OPENAI_API_KEY`
-- `GOOGLE_MAPS_API_KEY`
+---
+
+### Mac Setup
+
+Open **Terminal** and run the following commands one by one:
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/AuroraZhang0428/advancedDataScience.git
+cd advancedDataScience
+
+# 2. Create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+pip install flask flask-cors
+
+# 4. Start the web server
+python app.py
+```
+
+Then open your browser and go to **http://localhost:5050**
+
+To stop the server press `Ctrl + C` in the Terminal window.
+
+---
+
+### Windows Setup
+
+Open **Command Prompt** (`Win + R` → type `cmd` → Enter) or **PowerShell** and run:
+
+```bat
+:: 1. Clone the repository
+git clone https://github.com/AuroraZhang0428/advancedDataScience.git
+cd advancedDataScience
+
+:: 2. Create and activate a virtual environment
+python -m venv .venv
+.venv\Scripts\activate
+
+:: 3. Install dependencies
+pip install -r requirements.txt
+pip install flask flask-cors
+
+:: 4. Start the web server
+python app.py
+```
+
+Then open your browser and go to **http://localhost:5050**
+
+To stop the server press `Ctrl + C` in the Command Prompt window.
+
+---
+
+### Using uv (Mac or Windows — faster alternative)
+
+If you have [uv](https://docs.astral.sh/uv/) installed:
+
+```bash
+# Mac / Linux
+git clone https://github.com/AuroraZhang0428/advancedDataScience.git
+cd advancedDataScience
+uv venv
+source .venv/bin/activate          # Mac/Linux
+# .venv\Scripts\activate           # Windows
+uv pip install -r requirements.txt
+uv pip install flask flask-cors
+python app.py
+```
+
+---
+
+## Optional API Keys (for full AI mode)
+
+The app runs in three modes depending on which keys are set:
+
+| Mode | Keys needed | Features |
+|---|---|---|
+| **Offline** (default) | none | Rule-based parsing, deterministic scoring, plain text explanations |
+| **AI mode** | `OPENAI_API_KEY` | LLM parsing, LLM reranking, AI-written explanations |
+| **Full AI + Maps** | `OPENAI_API_KEY` + `GOOGLE_MAPS_API_KEY` | Everything above + live transit/food/commute enrichment |
+
+You can enter your OpenAI API key directly in the **Settings** panel inside the web UI — no environment setup required.
+
+To set keys via environment variables:
+
+**Mac / Linux:**
+```bash
+export OPENAI_API_KEY="sk-..."
+export GOOGLE_MAPS_API_KEY="AIza..."
+python app.py
+```
+
+**Windows (Command Prompt):**
+```bat
+set OPENAI_API_KEY=sk-...
+set GOOGLE_MAPS_API_KEY=AIza...
+python app.py
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:OPENAI_API_KEY="sk-..."
+$env:GOOGLE_MAPS_API_KEY="AIza..."
+python app.py
+```
+
+---
+
+## Using the Web UI
+
+1. Open **http://localhost:5050** in your browser
+2. Type a natural-language query into the search box, for example:
+   - *"2-bedroom with WiFi and good reviews in Brooklyn under $200/night"*
+   - *"Quiet remote-work apartment near a subway station in Manhattan"*
+   - *"Affordable private room in Williamsburg"*
+3. Or click one of the **quick-pick chips** below the search box
+4. Click **Search** and wait for the AI agent to process your request (~5–15 seconds)
+5. Click any result card to see the full score breakdown and explanation
+6. Use the **Settings** panel (top right) to add an API key or change the dataset
+
+---
 
 ## What The Agent Understands
 
-The parser can currently extract:
+The parser extracts:
 
-- bedroom and bathroom minimums
-- `max_price`
-- `target_price`
-- `price_floor`
-- nightly vs monthly price period
-- qualitative price preference like `cheap`, `moderate`, or `expensive`
-- preferred neighborhoods
-- amenities
-- work / school / commute destinations
-- transit priority and preferred transit modes
-- food-scene priority
-- remote-work and quiet preferences
-- review expectations
-- query-specific priority weights for ranking
+- Bedroom and bathroom minimums
+- `max_price`, `target_price`, `price_floor` with nightly vs monthly period
+- Qualitative price preference (`cheap`, `moderate`, `expensive`)
+- Preferred neighborhoods and areas
+- Requested amenities (WiFi, workspace, gym, laundry, parking, etc.)
+- Work / school / commute destinations
+- Transit priority and preferred modes (subway, train, bus)
+- Food-scene priority
+- Remote-work and quiet preferences
+- Review quality expectations
+- Query-specific priority weights for ranking
 
-## High-Level Pipeline
+---
+
+## Pipeline Overview
 
 ```text
 load_data
-  -> parse_preferences
-  -> filter_listings
-  -> score_rank
-  -> enrich_candidates
-  -> evaluate_results
-      -> explain                     when results are sufficient
-      -> relax_or_ask               when results are weak
-            -> filter_listings      when the agent retries
-            -> END                  when user clarification is needed
-            -> explain              when the agent stops
+  → parse_preferences          (LLM or rule-based fallback)
+  → filter_listings            (deterministic hard constraints)
+  → score_rank                 (deterministic scoring + optional LLM reranking)
+  → enrich_candidates          (optional Google Maps enrichment)
+  → evaluate_results
+      → explain                when results are sufficient
+      → relax_or_ask           when results are weak
+            → filter_listings  on retry
+            → END              when user clarification is needed
+            → explain          when agent stops
 ```
 
-## How Ranking Works
-
-### 1. Hard filtering
-
-Listings are first filtered by strict constraints such as:
-
-- minimum bedrooms
-- minimum bathrooms
-- `max_price`
-- room type
-
-### 2. Deterministic shortlist retrieval
-
-After filtering, the code computes a coarse retrieval score across the whole filtered dataset.
-
-This retrieval score uses:
-
-- review quality
-- amenity match, if amenities were requested
-- purpose alignment, if the user cares about remote work or quietness
-- neighborhood fit, if the query includes area / commute / transit / food intent
-- price fit, using `target_price`, `max_price`, `price_floor`, and qualitative price preference when relevant
-
-Important current behavior:
-
-- shortlist size is `30`
-- query-specific priority weights are inferred by the LLM once, then reused consistently across all listings for that query
-- non-applicable components are excluded from the retrieval score instead of being treated as perfect matches
-
-### 3. Stage-one LLM ranking
-
-The top 30 shortlisted listings are passed to the LLM, which:
-
-- directly judges holistic fit
-- returns component scores
-- returns an overall fit score
-- reranks the shortlist
-
-### 4. Google Maps enrichment
-
-Shortlisted listings are enriched with live location context from Google Maps Platform:
-
-- nearby subway / train / bus / transit hub results
-- nearby food venues
-- nearby grocery venues
-- commute times to named destinations
-
-### 5. Stage-two LLM reranking
-
-After enrichment, the LLM reranks the candidates again using the live geographic evidence.
-
-Current design intent:
-
-- live neighborhood evidence is primary
-- the earlier shortlist score is treated only as coarse retrieval context
-- stage two is no longer strongly anchored to a pre-blended prior score
-
-## Relaxation And Clarification
-
-When results are weak, the agent evaluates whether:
-
-- there are enough strong matches
-- the top candidates match the target price well enough
-- the top candidates satisfy a soft price floor well enough
-- there are enough viable results to stop
-
-Then the relaxation policy decides whether to:
-
-- relax a soft preference
-- ask the user for clarification
-- stop and explain the best available options
-
-The policy is currently LLM-driven, but it still chooses from a bounded set of allowed actions prepared by the code.
-
-## Explanations
-
-Final recommendations include:
-
-- listing title
-- host name
-- neighborhood
-- price
-- score breakdown
-- live neighborhood evidence
-- trade-offs
-
-Then the explanation draft is rewritten by the LLM into more natural recommendation text.
+---
 
 ## Folder Structure
 
 ```text
-agent/
-|-- config.py
-|-- graph.py
-|-- models.py
-|-- run_demo.py
-|-- state.py
-|-- nodes/
-|   |-- enrich_candidates.py
-|   |-- evaluate_results.py
-|   |-- explain.py
-|   |-- filter_listings.py
-|   |-- load_data.py
-|   |-- parse_preferences.py
-|   |-- relax_or_ask.py
-|   `-- score_rank.py
-|-- policies/
-|   `-- relaxation.py
-`-- services/
-    |-- dataset.py
-    |-- explanation.py
-    |-- google_maps.py
-    |-- neighborhoods.py
-    |-- parser.py
-    `-- scoring.py
+advancedDataScience/
+├── app.py                        Flask API server + frontend serving
+├── requirements.txt
+├── matched_subset_dataset.csv    NYC Airbnb listings dataset
+├── frontend/
+│   ├── index.html                Web UI
+│   ├── app.js                    Search logic and card rendering
+│   └── style.css                 UI styles
+└── agent/
+    ├── config.py                 Scoring weights and thresholds
+    ├── graph.py                  LangGraph workflow definition
+    ├── models.py                 Data models
+    ├── state.py                  Typed agent state
+    ├── run_demo.py               Command-line demo
+    ├── nodes/
+    │   ├── load_data.py
+    │   ├── parse_preferences.py
+    │   ├── filter_listings.py
+    │   ├── score_rank.py
+    │   ├── enrich_candidates.py
+    │   ├── evaluate_results.py
+    │   ├── relax_or_ask.py
+    │   └── explain.py
+    ├── policies/
+    │   └── relaxation.py         Adaptive relaxation policy
+    └── services/
+        ├── dataset.py            CSV loading and normalization
+        ├── parser.py             Preference extraction (LLM + rule-based)
+        ├── scoring.py            Filtering, scoring, and ranking
+        ├── explanation.py        Recommendation explanation generation
+        ├── google_maps.py        Live neighborhood enrichment
+        └── neighborhoods.py      Neighborhood scoring helpers
 ```
 
-## Installation
+---
 
-Create a Python 3.11+ environment and install dependencies:
+## Troubleshooting
 
-```bash
-pip install -r requirements.txt
-```
+**`ModuleNotFoundError: No module named 'flask'`**
+→ Make sure your virtual environment is activated before running `python app.py`.
+Mac: `source .venv/bin/activate` · Windows: `.venv\Scripts\activate`
 
-## Running The Demo
+**Port 5050 already in use**
+→ Kill the existing process or change the port in `app.py` (last line: `port=5050`).
 
-From the project root:
+**`Dataset not found` error in the browser**
+→ Make sure `matched_subset_dataset.csv` is in the project root directory. The file is included in the repository.
 
-```bash
-python -m agent.run_demo
-```
+**Search returns no results**
+→ Try a broader query (remove bedroom count or price limits). The dataset is NYC Airbnb listings — neighborhood names like Brooklyn, Manhattan, Williamsburg, Chelsea work best.
 
-You can also pass keys and a custom query explicitly:
+---
 
-```bash
-python -m agent.run_demo --api-key YOUR_OPENAI_KEY --google-maps-api-key YOUR_GOOGLE_KEY --query "I want to live in Manhattan around $500 a night and be very close to multiple subway stations."
-```
+## Architecture Notes
 
-The demo will prompt for any missing required keys.
-
-## Notes On The Current Architecture
-
-- This is no longer a pure rule-based recommender.
-- The system now uses the LLM for parsing, ranking, adaptive decision-making, and explanation generation.
-- The shortlist generation step is still deterministic and is used as retrieval scaffolding before the LLM performs deeper judgment.
-- Google Maps enrichment is required in the current runtime flow.
-
-## Next Steps
-
-- Improve the reasoning stage so the agent is better at deciding when to ask the user for clarification versus when to relax preferences automatically.
-- In particular, very unrealistic price points should trigger clarification more reliably instead of allowing the agent to expand neighborhoods or make a weaker relaxation first.
-- Add a separate user-facing explanation field when clarification is requested, so the agent explicitly states why new input is needed and what was wrong with the previous constraints.
+- The system is a **hybrid pipeline**: deterministic retrieval scaffolding + optional LLM judgment.
+- All LLM calls (parsing, ranking, relaxation, explanation) have deterministic rule-based fallbacks — the app works fully offline.
+- Google Maps enrichment adds live transit, food, grocery, and commute data but is entirely optional.
+- The shortlist size is 30; the top 5 are returned as final recommendations.
