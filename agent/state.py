@@ -30,3 +30,4 @@ class AgentState(TypedDict, total=False):
     questions_asked: list[str]
     final_recommendations: list[dict[str, Any]]
     final_explanations: list[str]
+    orchestrator_messages: list[dict[str, Any]]

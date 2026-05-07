@@ -75,15 +75,6 @@ def main() -> None:
         raise RuntimeError("OPENAI_API_KEY is required. Non-LLM fallbacks have been removed.")
     if args.google_maps_api_key:
         os.environ["GOOGLE_MAPS_API_KEY"] = args.google_maps_api_key
-    elif "GOOGLE_MAPS_API_KEY" not in os.environ:
-        import getpass
-        maps_key = getpass.getpass(
-            "Enter your Google Maps Platform API key for required live location enrichment: "
-        )
-        if maps_key.strip():
-            os.environ["GOOGLE_MAPS_API_KEY"] = maps_key.strip()
-    if "GOOGLE_MAPS_API_KEY" not in os.environ or not str(os.environ.get("GOOGLE_MAPS_API_KEY", "")).strip():
-        raise RuntimeError("GOOGLE_MAPS_API_KEY is required. Google Maps fallback has been removed.")
 
     graph = build_graph()
     
