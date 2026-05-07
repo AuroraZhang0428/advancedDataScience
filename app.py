@@ -80,6 +80,114 @@ def _listing_to_dict(listing: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+
+def _format_pref_value(value: Any) -> Any:
+    """Convert preference values into JSON-safe, frontend-friendly values."""
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple, set)):
+        return [v for v in value if v not in (None, "", [], {})]
+    if isinstance(value, dict):
+        return {str(k): _format_pref_value(v) for k, v in value.items() if v not in (None, "", [], {})}
+    return str(value)
+
+
+def _compact_dict(data: Any) -> dict[str, Any]:
+    """Remove empty values so the frontend only displays meaningful preferences."""
+    if not isinstance(data, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key, value in data.items():
+        formatted = _format_pref_value(value)
+        if formatted not in (None, "", [], {}):
+            compact[key] = formatted
+    return compact
+
+
+def _build_detected_preferences(result: dict[str, Any]) -> dict[str, Any]:
+    """Expose what the agent understood from the user's natural-language query."""
+    return {
+        "raw_preferences": _compact_dict(result.get("raw_preferences", {})),
+        "hard_constraints": _compact_dict(result.get("hard_constraints", {})),
+        "soft_preferences": _compact_dict(result.get("soft_preferences", {})),
+    }
+
+
+def _build_agent_trace(result: dict[str, Any]) -> list[dict[str, str]]:
+    """Create a concise, user-facing trace of the agent's workflow."""
+    trace: list[dict[str, str]] = [
+        {
+            "step": "Parsed preferences",
+            "detail": "Converted the natural-language request into structured search constraints and preferences.",
+        }
+    ]
+
+    filtered_count = len(result.get("filtered_listings", []) or [])
+    if filtered_count:
+        trace.append({
+            "step": "Filtered listings",
+            "detail": f"Applied hard constraints and kept {filtered_count} matching listings.",
+        })
+    else:
+        trace.append({
+            "step": "Filtered listings",
+            "detail": "Applied hard constraints to narrow the dataset.",
+        })
+
+    scored_count = len(result.get("scored_listings", []) or result.get("shortlisted_listings", []) or [])
+    if scored_count:
+        trace.append({
+            "step": "Scored and ranked candidates",
+            "detail": f"Ranked {scored_count} candidates using price, location, reviews, amenities, and lifestyle fit.",
+        })
+    else:
+        trace.append({
+            "step": "Scored and ranked candidates",
+            "detail": "Compared remaining listings against the user's soft preferences.",
+        })
+
+    diagnostics = result.get("results_diagnostics", {}) or {}
+    if diagnostics:
+        good_count = diagnostics.get("good_count")
+        if good_count is not None:
+            trace.append({
+                "step": "Checked result quality",
+                "detail": f"The evaluator found {good_count} high-quality matches before finalizing or adapting the search.",
+            })
+        else:
+            trace.append({
+                "step": "Checked result quality",
+                "detail": "The evaluator checked whether the ranked results were strong enough to show.",
+            })
+    else:
+        trace.append({
+            "step": "Checked result quality",
+            "detail": "The agent evaluated whether the results satisfied the search goal.",
+        })
+
+    for item in result.get("relaxation_history", []) or []:
+        action = str(item.get("action") or "Adjusted search").replace("_", " ").title()
+        change = item.get("change")
+        reason = item.get("reason") or "The agent adapted the search strategy to improve results."
+        detail = f"{change}. {reason}" if change else reason
+        trace.append({"step": action, "detail": detail})
+
+    if result.get("need_user_input"):
+        trace.append({
+            "step": "Asked for clarification",
+            "detail": result.get("user_question") or "The agent needs one more user decision before continuing.",
+        })
+    else:
+        final_count = len(result.get("final_recommendations", []) or [])
+        trace.append({
+            "step": "Finalized recommendations",
+            "detail": f"Generated {final_count} ranked recommendation{'s' if final_count != 1 else ''} with explanations.",
+        })
+
+    return trace
+
 def _apply_user_answer(state: dict[str, Any], question_key: str | None, answer: str) -> dict[str, Any]:
     """Update agent state based on the user's yes/no answer to a clarification question."""
     state = dict(state)
@@ -171,6 +279,8 @@ def _build_response(result: dict[str, Any]) -> dict[str, Any]:
         "relaxation_history": relaxation_history,
         "need_user_input": need_user_input,
         "user_question": user_question,
+        "detected_preferences": _build_detected_preferences(result),
+        "agent_trace": _build_agent_trace(result),
     }
 
     # If the agent needs clarification, save state and return a session token
