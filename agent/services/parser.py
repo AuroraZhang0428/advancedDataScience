@@ -41,6 +41,7 @@ if HAS_LLM:
 
 
     class ApartmentPreferences(BaseModel):
+        min_guests: int | None = Field(default=None, description="Minimum number of guests the listing should accommodate")
         min_bedrooms: int | None = Field(default=None, description="Minimum number of bedrooms")
         min_bathrooms: float | None = Field(default=None, description="Minimum number of bathrooms")
         price_floor: float | None = Field(
@@ -124,6 +125,20 @@ def _extract_bedrooms(query: str) -> int | None:
     patterns = [
         r"\b(?P<num>\d+|one|two|three|four|five)[\s-]*bed(room)?\b",
         r"\b(?P<num>\d+|one|two|three|four|five)\s+bedrooms?\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, query, flags=re.IGNORECASE)
+        if match:
+            return _normalize_number(match.group("num"))
+    return None
+
+
+def _extract_guest_capacity(query: str) -> int | None:
+    """Extract a minimum guest-capacity requirement from user text."""
+
+    patterns = [
+        r"(?:for|fits?|accommodates?|hosting|host)\s+(?P<num>\d+|one|two|three|four|five)\s+(?:guests?|people|persons?)\b",
+        r"(?P<num>\d+|one|two|three|four|five)\s+(?:guests?|people|persons?)\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, query, flags=re.IGNORECASE)
@@ -388,6 +403,7 @@ def _extract_room_type(query: str) -> str | None:
 
 
 def _build_preferences_dict(
+    min_guests: int | None,
     min_bedrooms: int | None,
     min_bathrooms: float | None,
     price_floor: float | None,
@@ -409,6 +425,7 @@ def _build_preferences_dict(
 ) -> dict[str, Any]:
     normalized_priority_weights = _normalize_priority_weights(priority_weights)
     raw_preferences = {
+        "min_guests": min_guests,
         "min_bedrooms": min_bedrooms,
         "min_bathrooms": min_bathrooms,
         "price_floor": price_floor,
@@ -433,6 +450,7 @@ def _build_preferences_dict(
         key: value
         for key, value in {
             "min_bedrooms": min_bedrooms,
+            "min_guests": min_guests,
             "min_bathrooms": min_bathrooms,
             "max_price": max_price,
             "price_period": price_period,
@@ -494,6 +512,12 @@ def _build_preferences_dict(
             "can_relax": min_bedrooms is not None and min_bedrooms >= 1,
             "requires_user_confirmation": min_bedrooms is not None,
             "relax_to": max((min_bedrooms or 0) - 1, 0),
+        },
+        "min_guests": {
+            "kind": "semi_hard",
+            "can_relax": min_guests is not None and min_guests >= 1,
+            "requires_user_confirmation": min_guests is not None,
+            "relax_to": max((min_guests or 0) - 1, 1),
         },
         "max_price": {
             "kind": "semi_hard",
@@ -588,6 +612,7 @@ def _require_llm_parser() -> None:
 def parse_preferences_rule_based(user_query: str) -> dict[str, Any]:
     """Parse a query into hard and soft preferences without an LLM."""
 
+    min_guests = _extract_guest_capacity(user_query)
     min_bedrooms = _extract_bedrooms(user_query)
     min_bathrooms = _extract_bathrooms(user_query)
     price_floor = _extract_price_floor(user_query)
@@ -608,6 +633,7 @@ def parse_preferences_rule_based(user_query: str) -> dict[str, Any]:
 
     return _build_preferences_dict(
         min_bedrooms=min_bedrooms,
+        min_guests=min_guests,
         min_bathrooms=min_bathrooms,
         price_floor=price_floor,
         max_price=max_price,
@@ -639,6 +665,9 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any]:
         
         prompt = (
             "Extract user apartment leasing parameters from this query:\\n\\n{query}\\n\\n"
+            "CRITICAL INSTRUCTION FOR GUEST CAPACITY:\\n"
+            "If the user mentions how many guests, people, or persons the place should fit, put that into min_guests.\\n"
+            "Examples include 'for 4 guests', 'fits 6 people', or 'accommodates 2'.\\n\\n"
             "CRITICAL INSTRUCTION FOR PRICE TYPE:\\n"
             "Distinguish a hard floor, hard ceiling budget, and target price.\\n"
             " - Put values like 'at least $200', 'minimum $200', '$200 minimum', or 'not cheaper than $200' into price_floor.\\n"
@@ -681,6 +710,7 @@ def extract_preferences_llm(user_query: str) -> dict[str, Any]:
         )
         
         return _build_preferences_dict(
+            min_guests=result.min_guests,
             min_bedrooms=result.min_bedrooms,
             min_bathrooms=result.min_bathrooms,
             price_floor=result.price_floor,

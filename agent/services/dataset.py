@@ -225,6 +225,8 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for column in ["price", "bedrooms", "bathrooms", "area_sqft", "latitude", "longitude"]:
         if column not in renamed.columns:
             renamed[column] = None
+    if "accommodates" not in renamed.columns:
+        renamed["accommodates"] = None
 
     normalized_rows: list[dict[str, Any]] = []
     for row in renamed.to_dict(orient="records"):
@@ -241,6 +243,7 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             neighborhood=str(row.get("neighborhood") or "").strip() or None,
             neighborhood_group=str(row.get("neighborhood_group") or "").strip() or None,
             price=_coerce_numeric(row.get("price")),
+            accommodates=_coerce_numeric(row.get("accommodates")),
             bedrooms=_infer_bedrooms(title, row.get("bedrooms"), room_type),
             bathrooms=_infer_bathrooms(row.get("bathrooms"), room_type),
             area_sqft=_coerce_numeric(row.get("area_sqft")),

@@ -269,17 +269,21 @@ def filter_hard_constraints(
     """Apply hard filtering rules to normalized listings."""
 
     filtered: list[dict[str, Any]] = []
+    min_guests = hard_constraints.get("min_guests")
     min_bedrooms = hard_constraints.get("min_bedrooms")
     min_bathrooms = hard_constraints.get("min_bathrooms")
     max_price = _effective_nightly_budget(hard_constraints)
     room_type = hard_constraints.get("room_type")
 
     for listing in listings:
+        accommodates = _safe_float(listing.get("accommodates"))
         bedrooms = _safe_float(listing.get("bedrooms"))
         bathrooms = _safe_float(listing.get("bathrooms"))
         price = _safe_float(listing.get("price"))
         listing_room_type = str(listing.get("raw", {}).get("room_type") or "")
 
+        if min_guests is not None and (accommodates is None or accommodates < float(min_guests)):
+            continue
         if min_bedrooms is not None and (bedrooms is None or bedrooms < float(min_bedrooms)):
             continue
         if min_bathrooms is not None and (bathrooms is None or bathrooms < float(min_bathrooms)):
