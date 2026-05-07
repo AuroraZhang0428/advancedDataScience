@@ -16,6 +16,7 @@ class Listing:
     neighborhood: str | None = None
     neighborhood_group: str | None = None
     price: float | None = None
+    accommodates: float | None = None
     bedrooms: float | None = None
     bathrooms: float | None = None
     area_sqft: float | None = None

@@ -18,6 +18,7 @@ class PreferenceWeights(BaseModel):
 
 
 class ApartmentPreferences(BaseModel):
+    min_guests: int | None = Field(default=None, description="Minimum number of guests the listing should accommodate")
     min_bedrooms: int | None = Field(default=None, description="Minimum number of bedrooms")
     min_bathrooms: float | None = Field(default=None, description="Minimum number of bathrooms")
     price_floor: float | None = Field(
@@ -67,6 +68,10 @@ class ApartmentPreferences(BaseModel):
 
 _PARSE_PROMPT = """\
 Extract user apartment leasing parameters from this query:\n\n{query}\n\n
+CRITICAL INSTRUCTION FOR GUEST CAPACITY:
+If the user mentions how many guests, people, or persons the place should fit, put that into min_guests.
+Examples include 'for 4 guests', 'fits 6 people', or 'accommodates 2'.
+
 CRITICAL INSTRUCTION FOR PRICE TYPE:
 Distinguish a hard floor, hard ceiling budget, and target price.
  - Put values like 'at least $200', 'minimum $200', '$200 minimum', or 'not cheaper than $200' into price_floor.
@@ -128,6 +133,7 @@ def _normalize_priority_weights(priority_weights: dict[str, Any] | None) -> dict
 
 
 def _build_preferences_dict(
+    min_guests: int | None,
     min_bedrooms: int | None,
     min_bathrooms: float | None,
     price_floor: float | None,
@@ -150,6 +156,7 @@ def _build_preferences_dict(
     normalized_weights = _normalize_priority_weights(priority_weights)
 
     raw_preferences = {
+        "min_guests": min_guests,
         "min_bedrooms": min_bedrooms,
         "min_bathrooms": min_bathrooms,
         "price_floor": price_floor,
@@ -172,6 +179,7 @@ def _build_preferences_dict(
 
     hard_constraints = {
         k: v for k, v in {
+            "min_guests": min_guests,
             "min_bedrooms": min_bedrooms,
             "min_bathrooms": min_bathrooms,
             "max_price": max_price,
@@ -198,7 +206,6 @@ def _build_preferences_dict(
         "expanded_neighborhood_search": False,
     }
 
-    # Metadata used by the orchestrator when deciding which constraints to relax
     relaxable_constraints = {
         "preferred_neighborhoods": {"kind": "soft", "can_relax": bool(preferred_neighborhoods), "requires_user_confirmation": False},
         "review_min_rating": {"kind": "soft", "can_relax": review_min_rating is not None, "requires_user_confirmation": False, "minimum": 3.8, "step": 0.2},
@@ -206,6 +213,7 @@ def _build_preferences_dict(
         "target_price": {"kind": "semi_hard", "can_relax": target_price is not None, "requires_user_confirmation": target_price is not None, "suggested_increase_pct": 0.5},
         "price_floor": {"kind": "semi_hard", "can_relax": price_floor is not None, "requires_user_confirmation": price_floor is not None, "suggested_decrease_pct": 0.15},
         "min_bedrooms": {"kind": "semi_hard", "can_relax": min_bedrooms is not None and min_bedrooms >= 1, "requires_user_confirmation": min_bedrooms is not None, "relax_to": max((min_bedrooms or 0) - 1, 0)},
+        "min_guests": {"kind": "semi_hard", "can_relax": min_guests is not None and min_guests >= 1, "requires_user_confirmation": min_guests is not None, "relax_to": max((min_guests or 0) - 1, 1)},
         "max_price": {"kind": "semi_hard", "can_relax": max_price is not None, "requires_user_confirmation": max_price is not None, "suggested_increase_pct": 0.1},
     }
 
@@ -235,6 +243,7 @@ def parse_preferences(user_query: str) -> dict[str, Any]:
         )
 
         return _build_preferences_dict(
+            min_guests=result.min_guests,
             min_bedrooms=result.min_bedrooms,
             min_bathrooms=result.min_bathrooms,
             price_floor=result.price_floor,

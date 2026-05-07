@@ -43,7 +43,7 @@
   settingsOverlay.addEventListener("click", closeSettings);
   $("saveSettings").addEventListener("click", () => {
     savedApiKey = $("apiKeyInput").value.trim();
-    savedDataset = $("datasetInput").value.trim() || "listings.csv";
+    savedDataset = $("datasetInput").value.trim() || "matched_subset_dataset.csv";
     closeSettings();
   });
 
@@ -85,6 +85,30 @@
     }
   }
 
+  /* ── Clarification flow ── */
+  async function answerClarification(sessionId, questionKey, answer) {
+    setLoading(true);
+    // Keep results section visible but show a "Thinking…" state
+    statusTitle.textContent = "Agent is rethinking…";
+    statusSubtitle.textContent = "Adjusting search based on your answer";
+    hideClarificationCard();
+
+    try {
+      const res = await fetch(API + "/api/clarify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, answer, question_key: questionKey }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Clarification failed");
+      renderResults(querySummaryText.textContent, data);
+    } catch (err) {
+      showToast(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   /* ── Loading ── */
   function setLoading(on) {
     loadingOverlay.style.display = on ? "flex" : "none";
@@ -95,9 +119,7 @@
   }
 
   function animateSteps() {
-    const steps = [
-      $("step1"), $("step2"), $("step3"), $("step4"),
-    ];
+    const steps = [$("step1"), $("step2"), $("step3"), $("step4")];
     steps.forEach((s) => { s.classList.remove("active"); s.querySelector(".step-dot").className = "step-dot"; });
     steps[0].classList.add("active");
     steps[0].querySelector(".step-dot").classList.add("active");
@@ -118,28 +140,45 @@
     const explanations = data.explanations || [];
 
     // Status bar
-    statusTitle.textContent = recs.length ? `Found ${recs.length} recommendation${recs.length > 1 ? "s" : ""}` : "No results found";
-    statusSubtitle.textContent = recs.length ? "Ranked by AI scoring" : "Try broadening your search";
-    statusIcon.textContent = recs.length ? "✓" : "—";
-    statusIcon.style.background = recs.length ? "var(--green-dim)" : "var(--amber-dim)";
-    statusIcon.style.color = recs.length ? "var(--green)" : "var(--amber)";
+    if (data.need_user_input) {
+      statusTitle.textContent = "Agent needs clarification";
+      statusSubtitle.textContent = "Answer the question below to continue";
+      statusIcon.textContent = "?";
+      statusIcon.style.background = "rgba(96,165,250,.1)";
+      statusIcon.style.color = "var(--blue)";
+    } else {
+      statusTitle.textContent = recs.length
+        ? `Found ${recs.length} recommendation${recs.length > 1 ? "s" : ""}`
+        : "No results found";
+      statusSubtitle.textContent = recs.length ? "Ranked by AI scoring" : "Try broadening your search";
+      statusIcon.textContent = recs.length ? "✓" : "—";
+      statusIcon.style.background = recs.length ? "var(--green-dim)" : "var(--amber-dim)";
+      statusIcon.style.color = recs.length ? "var(--green)" : "var(--amber)";
+    }
 
-    // Relaxation
+    // Relaxation history banner
     const history = data.relaxation_history || [];
-    if (history.length) {
+    const autonomousActions = history.filter(e => e.action === "relax_soft" || e.action === "relax_hard");
+    if (autonomousActions.length) {
       relaxBanner.style.display = "flex";
-      const latest = history[history.length - 1];
+      const latest = autonomousActions[autonomousActions.length - 1];
       relaxText.textContent = latest.reason || "The agent adjusted some preferences to find better matches.";
-    } else { relaxBanner.style.display = "none"; }
+    } else {
+      relaxBanner.style.display = "none";
+    }
 
-    // Question
-    if (data.need_user_input && data.user_question) {
-      questionBanner.style.display = "flex";
-      questionText.textContent = data.user_question;
-    } else { questionBanner.style.display = "none"; }
+    // Old question banner (legacy — hidden in favour of the inline card below)
+    questionBanner.style.display = "none";
 
     querySummaryText.textContent = query;
     cardsGrid.innerHTML = "";
+
+    // ── Clarification card (inline, above results) ──────────────────────────
+    if (data.need_user_input && data.user_question && data.session_id) {
+      cardsGrid.appendChild(
+        createClarificationCard(data.user_question, data.session_id, data.question_key)
+      );
+    }
 
     recs.forEach((rec, idx) => {
       cardsGrid.appendChild(createCard(rec, idx, explanations[idx] || ""));
@@ -149,18 +188,50 @@
     resultsSection.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  /* ── Clarification Card ── */
+  function createClarificationCard(question, sessionId, questionKey) {
+    const card = document.createElement("div");
+    card.className = "clarification-card";
+    card.id = "clarificationCard";
+
+    card.innerHTML = `
+      <div class="clarify-icon">🤔</div>
+      <div class="clarify-body">
+        <div class="clarify-label">Agent Question</div>
+        <p class="clarify-question">${esc(question)}</p>
+        <div class="clarify-actions">
+          <button class="clarify-btn clarify-yes" id="clarifyYes">Yes, sounds good</button>
+          <button class="clarify-btn clarify-no" id="clarifyNo">No, keep searching</button>
+        </div>
+      </div>`;
+
+    card.querySelector("#clarifyYes").addEventListener("click", () => {
+      answerClarification(sessionId, questionKey, "yes");
+    });
+    card.querySelector("#clarifyNo").addEventListener("click", () => {
+      answerClarification(sessionId, questionKey, "no");
+    });
+
+    return card;
+  }
+
+  function hideClarificationCard() {
+    const card = $("clarificationCard");
+    if (card) card.remove();
+  }
+
   /* ── Card Creation ── */
   function createCard(rec, idx, explanation) {
     const el = document.createElement("div");
     el.className = "listing-card";
     const score = rec.score || 0;
     const pct = Math.round(score * 100);
-    const r = 9; // radius for small 26px svg
+    const r = 9;
     const circ = 2 * Math.PI * r;
     const offset = circ - (score * circ);
     const scoreColor = score >= 0.7 ? "var(--green)" : score >= 0.5 ? "var(--amber)" : "var(--red)";
     const priceText = rec.price != null ? `$${rec.price.toLocaleString("en-US", { maximumFractionDigits: 0 })}` : "N/A";
-    const cx = 13, cy = 13; // centre of 26px viewBox
+    const cx = 13, cy = 13;
 
     el.innerHTML = `
       <div class="card-header">
@@ -202,7 +273,6 @@
   }
 
   /* ── Modal ── */
-
   function openModal(rec, idx, explanation) {
     const priceText = rec.price != null ? `$${rec.price.toLocaleString("en-US", { maximumFractionDigits: 0 })}` : "N/A";
     const bd = rec.score_breakdown || {};

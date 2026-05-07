@@ -22,6 +22,8 @@ def _format_listing(listing: dict[str, Any]) -> str:
     neighborhood = listing.get("neighborhood") or listing.get("neighborhood_group") or "Unknown area"
     price = listing.get("price")
     price_text = f"${float(price):,.0f}" if price is not None else "price unavailable"
+    accommodates = listing.get("accommodates")
+    guest_text = f" | accommodates={float(accommodates):.0f}" if accommodates is not None else ""
     location_context = dict(listing.get("location_context") or {})
     context_suffix = ""
     transit_parts: list[str] = []
@@ -41,7 +43,7 @@ def _format_listing(listing: dict[str, Any]) -> str:
         context_suffix = f" | transit={int(location_context['nearby_transit_count'])}"
     return (
         f"- {listing.get('title', 'Untitled')} | score={float(listing.get('score', 0.0)):.2f} | "
-        f"host={host_name} | {neighborhood} | {price_text}{context_suffix}"
+        f"host={host_name} | {neighborhood} | {price_text}{guest_text}{context_suffix}"
     )
 
 
