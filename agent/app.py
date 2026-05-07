@@ -1,0 +1,384 @@
+"""Flask API server for the LangGraph apartment leasing agent frontend."""
+
+from __future__ import annotations
+
+import os
+import uuid
+from datetime import datetime, timedelta
+from typing import Any
+
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from pathlib import Path
+
+from agent.config import DEFAULT_CONFIG
+from agent.graph import build_graph
+
+# ── Node imports for direct pipeline resumption ──────────────────────────────
+from agent.nodes.filter_listings import filter_listings_node
+from agent.nodes.score_rank import score_rank_node
+from agent.nodes.enrich_candidates import enrich_candidates_node
+from agent.nodes.evaluate_results import evaluate_results_node, evaluate_results_route
+from agent.nodes.relax_or_ask import relax_or_ask_node, relax_or_ask_route
+from agent.nodes.explain import explain_node
+
+app = Flask(__name__, static_folder="frontend", static_url_path="")
+CORS(app)
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+# Build the graph once at startup
+_graph = None
+
+# ── In-memory session store: {session_id: {state, created_at}} ───────────────
+_sessions: dict[str, dict] = {}
+_SESSION_TTL_MINUTES = 30
+
+
+def get_graph():
+    global _graph
+    if _graph is None:
+        _graph = build_graph()
+    return _graph
+
+
+def _purge_old_sessions() -> None:
+    """Remove sessions older than SESSION_TTL_MINUTES."""
+    cutoff = datetime.utcnow() - timedelta(minutes=_SESSION_TTL_MINUTES)
+    expired = [sid for sid, s in _sessions.items() if s["created_at"] < cutoff]
+    for sid in expired:
+        del _sessions[sid]
+
+
+def _listing_to_dict(listing: dict[str, Any]) -> dict[str, Any]:
+    """Serialize a listing dict with safe float handling."""
+    price = listing.get("price")
+    score = listing.get("score", 0.0)
+    score_breakdown = listing.get("score_breakdown", {})
+
+    return {
+        "id": listing.get("id", ""),
+        "title": listing.get("title", "Untitled"),
+        "neighborhood": listing.get("neighborhood") or listing.get("neighborhood_group") or "Unknown area",
+        "neighborhood_group": listing.get("neighborhood_group", ""),
+        "price": float(price) if price is not None else None,
+        "bedrooms": listing.get("bedrooms"),
+        "bathrooms": listing.get("bathrooms"),
+        "review_rating": listing.get("review_rating"),
+        "amenities": listing.get("amenities", []),
+        "wifi": listing.get("wifi"),
+        "workspace": listing.get("workspace"),
+        "quiet_score": listing.get("quiet_score"),
+        "purpose_tags": listing.get("purpose_tags", []),
+        "score": float(score),
+        "score_breakdown": {k: float(v) for k, v in score_breakdown.items()},
+        "llm_fit_score": listing.get("llm_fit_score"),
+        "llm_rank_reason": listing.get("llm_rank_reason"),
+        "deterministic_score": listing.get("deterministic_score"),
+        "latitude": listing.get("latitude"),
+        "longitude": listing.get("longitude"),
+    }
+
+
+
+def _format_pref_value(value: Any) -> Any:
+    """Convert preference values into JSON-safe, frontend-friendly values."""
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple, set)):
+        return [v for v in value if v not in (None, "", [], {})]
+    if isinstance(value, dict):
+        return {str(k): _format_pref_value(v) for k, v in value.items() if v not in (None, "", [], {})}
+    return str(value)
+
+
+def _compact_dict(data: Any) -> dict[str, Any]:
+    """Remove empty values so the frontend only displays meaningful preferences."""
+    if not isinstance(data, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key, value in data.items():
+        formatted = _format_pref_value(value)
+        if formatted not in (None, "", [], {}):
+            compact[key] = formatted
+    return compact
+
+
+def _build_detected_preferences(result: dict[str, Any]) -> dict[str, Any]:
+    """Expose what the agent understood from the user's natural-language query."""
+    return {
+        "raw_preferences": _compact_dict(result.get("raw_preferences", {})),
+        "hard_constraints": _compact_dict(result.get("hard_constraints", {})),
+        "soft_preferences": _compact_dict(result.get("soft_preferences", {})),
+    }
+
+
+def _build_agent_trace(result: dict[str, Any]) -> list[dict[str, str]]:
+    """Create a concise, user-facing trace of the agent's workflow."""
+    trace: list[dict[str, str]] = [
+        {
+            "step": "Parsed preferences",
+            "detail": "Converted the natural-language request into structured search constraints and preferences.",
+        }
+    ]
+
+    filtered_count = len(result.get("filtered_listings", []) or [])
+    if filtered_count:
+        trace.append({
+            "step": "Filtered listings",
+            "detail": f"Applied hard constraints and kept {filtered_count} matching listings.",
+        })
+    else:
+        trace.append({
+            "step": "Filtered listings",
+            "detail": "Applied hard constraints to narrow the dataset.",
+        })
+
+    scored_count = len(result.get("scored_listings", []) or result.get("shortlisted_listings", []) or [])
+    if scored_count:
+        trace.append({
+            "step": "Scored and ranked candidates",
+            "detail": f"Ranked {scored_count} candidates using price, location, reviews, amenities, and lifestyle fit.",
+        })
+    else:
+        trace.append({
+            "step": "Scored and ranked candidates",
+            "detail": "Compared remaining listings against the user's soft preferences.",
+        })
+
+    diagnostics = result.get("results_diagnostics", {}) or {}
+    if diagnostics:
+        good_count = diagnostics.get("good_count")
+        if good_count is not None:
+            trace.append({
+                "step": "Checked result quality",
+                "detail": f"The evaluator found {good_count} high-quality matches before finalizing or adapting the search.",
+            })
+        else:
+            trace.append({
+                "step": "Checked result quality",
+                "detail": "The evaluator checked whether the ranked results were strong enough to show.",
+            })
+    else:
+        trace.append({
+            "step": "Checked result quality",
+            "detail": "The agent evaluated whether the results satisfied the search goal.",
+        })
+
+    for item in result.get("relaxation_history", []) or []:
+        action = str(item.get("action") or "Adjusted search").replace("_", " ").title()
+        change = item.get("change")
+        reason = item.get("reason") or "The agent adapted the search strategy to improve results."
+        detail = f"{change}. {reason}" if change else reason
+        trace.append({"step": action, "detail": detail})
+
+    if result.get("need_user_input"):
+        trace.append({
+            "step": "Asked for clarification",
+            "detail": result.get("user_question") or "The agent needs one more user decision before continuing.",
+        })
+    else:
+        final_count = len(result.get("final_recommendations", []) or [])
+        trace.append({
+            "step": "Finalized recommendations",
+            "detail": f"Generated {final_count} ranked recommendation{'s' if final_count != 1 else ''} with explanations.",
+        })
+
+    return trace
+
+def _apply_user_answer(state: dict[str, Any], question_key: str | None, answer: str) -> dict[str, Any]:
+    """Update agent state based on the user's yes/no answer to a clarification question."""
+    state = dict(state)
+    is_yes = answer.lower().strip() in {"yes", "y", "ok", "sure", "yeah", "yep", "okay", "sure thing"}
+
+    # Mark question as answered so the relaxation policy won't repeat it
+    questions_asked = list(state.get("questions_asked", []))
+    if question_key and question_key not in questions_asked:
+        questions_asked.append(question_key)
+    state["questions_asked"] = questions_asked
+    state["need_user_input"] = False
+    state["user_question"] = None
+
+    if not is_yes:
+        # User declined — don't update constraints; policy will try next option
+        return state
+
+    relaxable = state.get("relaxable_constraints", {})
+    hard = dict(state.get("hard_constraints", {}))
+    soft = dict(state.get("soft_preferences", {}))
+
+    if question_key == "min_bedrooms":
+        current = hard.get("min_bedrooms")
+        if current is not None:
+            hard["min_bedrooms"] = max(int(float(current)) - 1, 0)
+
+    elif question_key == "max_price":
+        current = hard.get("max_price")
+        if current is not None:
+            pct = float(relaxable.get("max_price", {}).get("suggested_increase_pct", 0.10))
+            hard["max_price"] = round(float(current) * (1 + pct), 2)
+
+    elif question_key == "target_price":
+        current = soft.get("target_price")
+        if current is not None:
+            soft["target_price"] = round(float(current) * 1.5, 2)
+
+    state["hard_constraints"] = hard
+    state["soft_preferences"] = soft
+    return state
+
+
+def _resume_pipeline(state: dict[str, Any]) -> dict[str, Any]:
+    """Re-run the pipeline from filter_listings onward using direct node calls.
+
+    This skips load_data and parse_preferences so the existing parsed
+    preferences and loaded listings are reused with any updated constraints.
+    """
+    MAX_RESUME_ATTEMPTS = 3
+
+    for _ in range(MAX_RESUME_ATTEMPTS):
+        state.update(filter_listings_node(state))
+        state.update(score_rank_node(state))
+        state.update(enrich_candidates_node(state))
+        state.update(evaluate_results_node(state))
+
+        if evaluate_results_route(state) == "sufficient":
+            state.update(explain_node(state))
+            return state
+
+        # Results still insufficient — run the relaxation policy
+        state.update(relax_or_ask_node(state))
+        next_route = relax_or_ask_route(state)
+
+        if next_route == "wait_user":
+            # Agent needs another clarification — surface it to the user
+            return state
+        elif next_route == "explain":
+            state.update(explain_node(state))
+            return state
+        # next_route == "retry" → loop and try again with relaxed constraints
+
+    # Exhausted retries — explain best available
+    state.update(explain_node(state))
+    return state
+
+
+def _build_response(result: dict[str, Any]) -> dict[str, Any]:
+    """Convert final graph state into the JSON response shape."""
+    recommendations = [_listing_to_dict(r) for r in result.get("final_recommendations", [])]
+    explanations = result.get("final_explanations", [])
+    relaxation_history = result.get("relaxation_history", [])
+    need_user_input = result.get("need_user_input", False)
+    user_question = result.get("user_question", None)
+
+    response: dict[str, Any] = {
+        "recommendations": recommendations,
+        "explanations": explanations,
+        "relaxation_history": relaxation_history,
+        "need_user_input": need_user_input,
+        "user_question": user_question,
+        "detected_preferences": _build_detected_preferences(result),
+        "agent_trace": _build_agent_trace(result),
+    }
+
+    # If the agent needs clarification, save state and return a session token
+    if need_user_input and user_question:
+        _purge_old_sessions()
+        session_id = str(uuid.uuid4())
+        _sessions[session_id] = {
+            "state": dict(result),
+            "created_at": datetime.utcnow(),
+        }
+        response["session_id"] = session_id
+        # Surface the question_key so the frontend can label the answer correctly
+        question_key = (result.get("latest_decision") or {}).get("change", {}).get("question_key")
+        response["question_key"] = question_key
+
+    return response
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route("/")
+def index():
+    return app.send_static_file("index.html")
+
+
+@app.route("/api/search", methods=["POST"])
+def search():
+    data = request.get_json(force=True)
+    query = data.get("query", "").strip()
+    api_key = data.get("api_key", "").strip()
+    dataset = data.get("dataset", str(DEFAULT_CONFIG.dataset_path))
+
+    if not query:
+        return jsonify({"error": "Query is required."}), 400
+
+    dataset_path = Path(dataset)
+    if not dataset_path.is_absolute():
+        dataset_path = PROJECT_ROOT / dataset_path
+    if not dataset_path.exists():
+        return jsonify({"error": f"Dataset not found: {dataset_path}"}), 400
+
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
+    elif "OPENAI_API_KEY" not in os.environ:
+        os.environ.pop("OPENAI_API_KEY", None)
+
+    try:
+        graph = get_graph()
+        result = graph.invoke(
+            {
+                "user_query": query,
+                "dataset_path": str(dataset_path),
+            }
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify(_build_response(result))
+
+
+@app.route("/api/clarify", methods=["POST"])
+def clarify():
+    """Accept the user's answer to a clarification question and resume the pipeline."""
+    data = request.get_json(force=True)
+    session_id = data.get("session_id", "").strip()
+    answer = data.get("answer", "").strip()
+    question_key = data.get("question_key")
+
+    if not session_id:
+        return jsonify({"error": "session_id is required."}), 400
+    if not answer:
+        return jsonify({"error": "answer is required."}), 400
+
+    session = _sessions.get(session_id)
+    if not session:
+        return jsonify({"error": "Session not found or expired. Please start a new search."}), 404
+
+    saved_state = dict(session["state"])
+
+    # Apply the user's answer to update constraints
+    updated_state = _apply_user_answer(saved_state, question_key, answer)
+
+    try:
+        result = _resume_pipeline(updated_state)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    # If the resumed pipeline needs yet another clarification, the session is
+    # updated in _build_response with a fresh session_id.
+    del _sessions[session_id]
+
+    return jsonify(_build_response(result))
+
+
+@app.route("/api/health")
+def health():
+    return jsonify({"status": "ok", "active_sessions": len(_sessions)})
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5050)

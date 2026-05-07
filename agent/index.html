@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NestAI — Smart Apartment Finder</title>
+  <meta name="description" content="AI-powered apartment leasing agent that finds your perfect NYC home based on your preferences, budget, and lifestyle." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=DM+Serif+Display:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-icon">⌂</span>
+        <span class="logo-text">Nest<span class="logo-accent">AI</span></span>
+      </div>
+      <nav class="nav">
+        <button class="nav-btn" id="settingsToggle" title="API Settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"></path>
+          </svg>
+          Settings
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Settings Panel -->
+  <div class="settings-overlay" id="settingsOverlay"></div>
+  <aside class="settings-panel" id="settingsPanel">
+    <div class="settings-header">
+      <h3>Agent Settings</h3>
+      <button class="close-btn" id="settingsClose">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="field-label">OpenAI API Key <span class="optional">(optional — enables AI-powered explanations)</span></label>
+      <input type="password" id="apiKeyInput" class="text-input" placeholder="sk-..." autocomplete="off" />
+      <p class="hint">Without a key, the agent uses deterministic rule-based parsing and explanations.</p>
+
+      <label class="field-label" style="margin-top:1.5rem;">Dataset CSV Path</label>
+      <input type="text" id="datasetInput" class="text-input" placeholder="matched_subset_dataset.csv" value="matched_subset_dataset.csv" />
+      <p class="hint">Path to the cleaned rental dataset CSV file (relative to project root).</p>
+    </div>
+    <div class="settings-footer">
+      <button class="btn-primary" id="saveSettings">Save Settings</button>
+    </div>
+  </aside>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-bg">
+      <div class="orb orb-1"></div>
+      <div class="orb orb-2"></div>
+      <div class="orb orb-3"></div>
+      <div class="grid-overlay"></div>
+    </div>
+    <div class="hero-content">
+      <div class="hero-badge">
+        <span class="badge-dot"></span>
+        Powered by LangGraph AI
+      </div>
+      <h1 class="hero-title">
+        Find your<br />
+        <em class="hero-accent">perfect home</em><br />
+        in New York City
+      </h1>
+      <p class="hero-subtitle">
+        Describe what you're looking for in plain English. Our AI agent parses your preferences,
+        filters thousands of listings, and ranks them just for you.
+      </p>
+
+      <!-- Search Box -->
+      <div class="search-container">
+        <div class="search-box" id="searchBox">
+          <div class="search-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <circle cx="11" cy="11" r="8"></circle>
+              <path d="m21 21-4.35-4.35"></path>
+            </svg>
+          </div>
+          <textarea
+            id="queryInput"
+            class="search-textarea"
+            placeholder="e.g. I want a 2-bedroom apartment with WiFi, good reviews, and ideally in Chelsea or Greenwich Village, budget around $200/night…"
+            rows="3"
+          ></textarea>
+          <button class="search-btn" id="searchBtn">
+            <span class="btn-text">Search</span>
+            <span class="btn-spinner hidden" id="btnSpinner">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="spin">
+                <path d="M21 12a9 9 0 1 1-6.22-8.56"></path>
+              </svg>
+            </span>
+          </button>
+        </div>
+        <div class="search-chips">
+          <span class="chip" data-query="2-bedroom with WiFi, good reviews, preferably in Chelsea">2BR in Chelsea</span>
+          <span class="chip" data-query="Affordable private room with good reviews near Williamsburg, quiet, under $80/night">Budget in Williamsburg</span>
+          <span class="chip" data-query="Luxury entire apartment with parking, gym, doorman in Upper East Side">Luxury UES</span>
+          <span class="chip" data-query="Remote work friendly apartment with strong WiFi, a workspace, and quiet surroundings in Brooklyn">WFH in Brooklyn</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Results Section -->
+  <main class="results-section" id="resultsSection" style="display:none">
+    <div class="results-inner">
+
+      <!-- Status Bar -->
+      <div class="status-bar" id="statusBar">
+        <div class="status-left">
+          <div class="status-icon" id="statusIcon">✓</div>
+          <div class="status-text">
+            <strong id="statusTitle">Found 5 recommendations</strong>
+            <span id="statusSubtitle">Based on your preferences</span>
+          </div>
+        </div>
+        <div class="status-right">
+          <button class="btn-ghost" id="newSearchBtn">New Search</button>
+        </div>
+      </div>
+
+      <!-- Relaxation Notice -->
+      <div class="notice-banner" id="relaxationBanner" style="display:none">
+        <div class="notice-icon">🔄</div>
+        <div class="notice-content">
+          <strong>Preferences were adjusted</strong>
+          <span id="relaxationText">The agent expanded your search to find better results.</span>
+        </div>
+      </div>
+
+      <!-- User Input Required -->
+      <div class="notice-banner notice-question" id="questionBanner" style="display:none">
+        <div class="notice-icon">❓</div>
+        <div class="notice-content">
+          <strong>Agent needs clarification</strong>
+          <span id="questionText"></span>
+        </div>
+      </div>
+
+      <!-- Query Summary -->
+      <div class="query-summary" id="querySummary">
+        <span class="qs-label">Your search:</span>
+        <span class="qs-text" id="querySummaryText"></span>
+      </div>
+
+      <!-- Detected Preferences -->
+      <div class="insight-panel" id="preferencesPanel" style="display:none">
+        <div class="panel-header">
+          <div class="panel-icon">🧠</div>
+          <div>
+            <h3>Detected Preferences</h3>
+            <p>What the agent understood from your request</p>
+          </div>
+        </div>
+        <div class="preferences-grid" id="preferencesGrid"></div>
+      </div>
+
+      <!-- Agent Process -->
+      <div class="insight-panel" id="agentTracePanel" style="display:none">
+        <div class="panel-header">
+          <div class="panel-icon">⚙️</div>
+          <div>
+            <h3>Agent Process</h3>
+            <p>How the agent parsed, filtered, adapted, and finalized the search</p>
+          </div>
+        </div>
+        <div class="agent-trace-list" id="agentTraceList"></div>
+      </div>
+
+      <!-- Prototype Note -->
+      <div class="prototype-note">
+        This prototype uses historical NYC listing data. Active booking links are not included, so NestAI focuses on recommendation reasoning, comparison, and explanation.
+      </div>
+
+      <!-- Results Grid -->
+      <div class="cards-grid" id="cardsGrid"></div>
+    </div>
+  </main>
+
+  <!-- Error Toast -->
+  <div class="toast toast-error" id="errorToast">
+    <span class="toast-icon">⚠️</span>
+    <span id="errorMessage">Something went wrong. Please try again.</span>
+    <button class="toast-close" id="errorClose">✕</button>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div class="loading-overlay" id="loadingOverlay" style="display:none">
+    <div class="loading-card">
+      <div class="loading-animation">
+        <div class="pulse-ring"></div>
+        <div class="pulse-ring delay-1"></div>
+        <div class="pulse-ring delay-2"></div>
+        <div class="pulse-icon">⌂</div>
+      </div>
+      <h3 class="loading-title">Finding your perfect home…</h3>
+      <div class="loading-steps">
+        <div class="step" id="step1">
+          <div class="step-dot active"></div>
+          <span>Parsing your preferences</span>
+        </div>
+        <div class="step" id="step2">
+          <div class="step-dot"></div>
+          <span>Filtering listings</span>
+        </div>
+        <div class="step" id="step3">
+          <div class="step-dot"></div>
+          <span>Scoring &amp; ranking</span>
+        </div>
+        <div class="step" id="step4">
+          <div class="step-dot"></div>
+          <span>Generating explanations</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Listing Detail Modal -->
+  <div class="modal-overlay" id="modalOverlay" style="display:none">
+    <div class="modal" id="listingModal">
+      <button class="modal-close" id="modalClose">✕</button>
+      <div id="modalContent"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
