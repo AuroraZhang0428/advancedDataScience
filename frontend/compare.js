@@ -246,7 +246,7 @@
     s.id = "cmp-styles";
     s.textContent = `
       #cmp-toggle-btn {
-        position: fixed; top: 16px; right: 16px; z-index: 1000;
+        position: fixed; top: 16px; right: 180px; z-index: 1000;
         padding: 9px 20px;
         background: linear-gradient(135deg, #2a9d8f, #264653);
         color: #fff; border: none; border-radius: 22px;
