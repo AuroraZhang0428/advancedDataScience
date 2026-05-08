@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 from urllib import error, request
 
@@ -23,6 +24,10 @@ PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 PLACES_NEARBY_SEARCH_URL = "https://places.googleapis.com/v1/places:searchNearby"
 ROUTES_COMPUTE_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 
+TRANSIT_RADIUS_METERS = 1000
+FOOD_RADIUS_METERS = 1400
+GROCERY_RADIUS_METERS = 1400
+
 TRANSIT_TYPES = ["subway_station", "train_station", "transit_station", "bus_station"]
 FOOD_TYPES = ["restaurant", "cafe", "bakery", "meal_takeaway"]
 GROCERY_TYPES = ["supermarket", "grocery_store", "convenience_store"]
@@ -32,6 +37,28 @@ TRANSIT_TYPE_TO_MODE = {
     "bus_station": "bus",
     "transit_station": "transit_hub",
 }
+
+# Maps user-supplied cuisine labels to substrings found in Google place names/types
+CUISINE_TYPE_MAP: dict[str, list[str]] = {
+    "italian": ["italian", "pizza", "pasta", "trattoria", "osteria"],
+    "pizza": ["pizza"],
+    "japanese": ["japanese", "sushi", "ramen", "izakaya", "tempura"],
+    "sushi": ["sushi"],
+    "chinese": ["chinese", "dim sum", "cantonese", "szechuan", "peking"],
+    "mexican": ["mexican", "taco", "burrito", "tex-mex"],
+    "indian": ["indian", "curry", "tandoor", "biryani"],
+    "thai": ["thai"],
+    "french": ["french", "brasserie", "bistro", "crepe"],
+    "american": ["american", "burger", "bbq", "barbecue", "diner", "steakhouse"],
+    "fast food": ["mcdonald", "burger king", "subway", "kfc", "wendy", "chipotle", "five guys", "shake shack"],
+    "cafe": ["cafe", "coffee", "espresso", "starbucks", "dunkin"],
+    "bakery": ["bakery", "boulangerie", "patisserie", "pastry"],
+    "vegan": ["vegan", "plant-based", "plant based"],
+    "vegetarian": ["vegetarian", "vegan", "veggie"],
+}
+
+# Regex matching a single subway/train line token like "A", "1", "Q", "L", "NJ", "PATH"
+_LINE_TOKEN_RE = re.compile(r'^[A-Z0-9]{1,4}$')
 
 
 if HAS_LLM:
@@ -215,21 +242,34 @@ def _collect_place_names(places: list[dict[str, Any]], limit: int = 3) -> list[s
     return names
 
 
+def _is_path_station(place: dict[str, Any]) -> bool:
+    """Detect a PATH station by display name since Google Places has no dedicated type."""
+    display_name = place.get("displayName") or {}
+    name = (display_name.get("text") if isinstance(display_name, dict) else "") or ""
+    name_upper = name.upper()
+    return any(kw in name_upper for kw in ("PATH STATION", "PATH TRAIN", "PATH TERMINAL", "PATH - "))
+
+
 def _classify_transit_places(places: list[dict[str, Any]]) -> dict[str, Any]:
     """Break nearby transit results into mode-specific counts and examples."""
 
-    counts = {"subway": 0, "train": 0, "bus": 0, "transit_hub": 0}
-    examples = {"subway": [], "train": [], "bus": [], "transit_hub": []}
+    counts = {"subway": 0, "train": 0, "bus": 0, "transit_hub": 0, "path": 0}
+    examples: dict[str, list[str]] = {"subway": [], "train": [], "bus": [], "transit_hub": [], "path": []}
 
     for place in places:
-        primary_type = str(place.get("primaryType") or "").strip().lower()
-        mode = TRANSIT_TYPE_TO_MODE.get(primary_type, "transit_hub")
-        counts[mode] += 1
-
         display_name = place.get("displayName") or {}
         text = display_name.get("text") if isinstance(display_name, dict) else None
+        name_str = str(text or "")
+
+        if _is_path_station(place):
+            mode = "path"
+        else:
+            primary_type = str(place.get("primaryType") or "").strip().lower()
+            mode = TRANSIT_TYPE_TO_MODE.get(primary_type, "transit_hub")
+
+        counts[mode] += 1
         if text and len(examples[mode]) < 3:
-            examples[mode].append(str(text))
+            examples[mode].append(name_str)
 
     return {
         "counts": counts,
@@ -237,12 +277,143 @@ def _classify_transit_places(places: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _count_to_score(count: int, saturation: int) -> float:
-    """Convert a raw nearby-place count into a normalized score."""
+def _cuisine_matches(place_name: str, cuisine_labels: list[str]) -> bool:
+    """Return True if the place name contains a substring for any of the cuisine labels."""
+    name_lower = place_name.lower()
+    for label in cuisine_labels:
+        for substring in CUISINE_TYPE_MAP.get(label, [label]):
+            if substring in name_lower:
+                return True
+    return False
 
-    if saturation <= 0:
+
+def _score_food_places(
+    food_places: list[dict[str, Any]],
+    preferred_cuisines: list[str],
+    avoided_cuisines: list[str],
+) -> float:
+    """Score food places with cuisine-awareness."""
+    if not food_places:
         return 0.0
-    return _clip(count / float(saturation))
+
+    total = 0.0
+    for place in food_places:
+        display_name = place.get("displayName") or {}
+        name = (display_name.get("text") if isinstance(display_name, dict) else "") or ""
+        if avoided_cuisines and _cuisine_matches(name, avoided_cuisines):
+            continue
+        if preferred_cuisines and _cuisine_matches(name, preferred_cuisines):
+            total += 0.20
+        else:
+            total += 0.10
+
+    # Normalize: 7 generic places ≈ 0.70, saturate at 1.0
+    return _clip(total / 0.70)
+
+
+def _transit_diversity_score(transit_places: list[dict[str, Any]]) -> float:
+    """Score transit by mode variety and distinct subway/train line count."""
+    if not transit_places:
+        return 0.0
+
+    # Mode diversity
+    modes_present: set[str] = set()
+    for place in transit_places:
+        if _is_path_station(place):
+            modes_present.add("path")
+        else:
+            primary_type = str(place.get("primaryType") or "").strip().lower()
+            modes_present.add(TRANSIT_TYPE_TO_MODE.get(primary_type, "transit_hub"))
+    mode_score = _clip(len(modes_present) * 0.25)
+
+    # Line diversity: extract tokens from parenthetical suffixes like "(4,5,6,L)"
+    unique_lines: set[str] = set()
+    for place in transit_places:
+        display_name = place.get("displayName") or {}
+        name = (display_name.get("text") if isinstance(display_name, dict) else "") or ""
+        for paren in re.findall(r'\(([^)]+)\)', name):
+            for token in re.split(r'[,/\s]+', paren):
+                token = token.strip().upper()
+                if token and _LINE_TOKEN_RE.match(token):
+                    unique_lines.add(token)
+
+    if len(unique_lines) >= 2:
+        line_score = _clip(len(unique_lines) * 0.12)
+        return _clip(mode_score * 0.3 + line_score * 0.7)
+    return mode_score
+
+
+def _score_transit_places(
+    transit_places: list[dict[str, Any]],
+    preferred_transit_modes: list[str],
+    transit_breakdown: dict[str, Any],
+) -> float:
+    """Compute a transit score that considers diversity and user mode preferences."""
+    transit_counts = transit_breakdown["counts"]
+
+    if preferred_transit_modes:
+        preferred_hits = sum(transit_counts.get(mode, 0) for mode in preferred_transit_modes)
+        base = _clip(preferred_hits / max(2, len(preferred_transit_modes) * 2))
+        # Small bonus for transit hubs and PATH when user wants PATH
+        hub_bonus = min(0.1, 0.05 * transit_counts.get("transit_hub", 0))
+        path_bonus = 0.1 if "path" in preferred_transit_modes and transit_counts.get("path", 0) > 0 else 0.0
+        return _clip(base + hub_bonus + path_bonus)
+
+    return _transit_diversity_score(transit_places)
+
+
+def _resolve_travel_mode(
+    origin_lat: float,
+    origin_lon: float,
+    dest_lat: float,
+    dest_lon: float,
+    transit_priority: bool,
+) -> str:
+    """Pick WALK for very short distances, TRANSIT or DRIVE otherwise."""
+    import math
+    dlat = (dest_lat - origin_lat) * 111_000
+    dlon = (dest_lon - origin_lon) * 111_000 * math.cos(math.radians(origin_lat))
+    distance_m = math.sqrt(dlat ** 2 + dlon ** 2)
+    if distance_m < 1000:
+        return "WALK"
+    return "TRANSIT" if transit_priority else "DRIVE"
+
+
+def _compute_dynamic_weights(soft_preferences: dict[str, Any], has_commute: bool) -> dict[str, float]:
+    """Compute location score component weights mirroring resolve_scoring_weights logic."""
+    transit_priority = bool(soft_preferences.get("transit_priority"))
+    food_priority = bool(soft_preferences.get("food_scene_priority"))
+    preferred_modes = [str(m).lower() for m in soft_preferences.get("preferred_transit_modes", [])]
+    preferred_cuisines = soft_preferences.get("preferred_cuisines", [])
+
+    w_transit = 0.20
+    w_food = 0.15
+    w_grocery = 0.15
+    w_commute = 0.50 if has_commute else 0.0
+
+    if transit_priority or preferred_modes:
+        w_transit += 0.10
+    if food_priority or preferred_cuisines:
+        w_food += 0.10
+
+    if not has_commute:
+        # Redistribute commute weight proportionally
+        total_non_commute = w_transit + w_food + w_grocery
+        if total_non_commute > 0:
+            scale = 1.0 / total_non_commute
+            w_transit *= scale
+            w_food *= scale
+            w_grocery *= scale
+        return {"transit": w_transit, "food": w_food, "grocery": w_grocery, "commute": 0.0}
+
+    # Normalize so all weights sum to 1
+    total = w_transit + w_food + w_grocery + w_commute
+    return {
+        "transit": w_transit / total,
+        "food": w_food / total,
+        "grocery": w_grocery / total,
+        "commute": w_commute / total,
+    }
 
 
 def _commute_minutes_to_score(minutes: float | None) -> float | None:
@@ -273,9 +444,11 @@ def _location_context_summary(listing: dict[str, Any]) -> str:
     train_count = context.get("nearby_train_count", 0)
     bus_count = context.get("nearby_bus_count", 0)
     transit_hub_count = context.get("nearby_transit_hub_count", 0)
+    path_count = context.get("nearby_path_count", 0)
     subway_examples = ", ".join(context.get("nearby_subway_examples", [])[:3]) or "none"
     train_examples = ", ".join(context.get("nearby_train_examples", [])[:3]) or "none"
     bus_examples = ", ".join(context.get("nearby_bus_examples", [])[:3]) or "none"
+    path_examples = ", ".join(context.get("nearby_path_examples", [])[:3]) or "none"
     food_examples = ", ".join(context.get("nearby_food_examples", [])[:3]) or "none"
     grocery_examples = ", ".join(context.get("nearby_grocery_examples", [])[:3]) or "none"
     return (
@@ -286,6 +459,7 @@ def _location_context_summary(listing: dict[str, Any]) -> str:
         f"subway_count={subway_count} ({subway_examples}) | "
         f"train_count={train_count} ({train_examples}) | "
         f"bus_count={bus_count} ({bus_examples}) | "
+        f"path_count={path_count} ({path_examples}) | "
         f"transit_hub_count={transit_hub_count} | "
         f"food_count={context.get('nearby_food_count', 0)} ({food_examples}) | "
         f"grocery_count={context.get('nearby_grocery_count', 0)} ({grocery_examples}) | "
@@ -429,30 +603,49 @@ def _enrich_listing(
     nearby_grocery: list[dict[str, Any]] = []
 
     try:
-        nearby_transit = _search_nearby(latitude, longitude, TRANSIT_TYPES, radius_meters=1200, max_result_count=6)
+        nearby_transit = _search_nearby(latitude, longitude, TRANSIT_TYPES, radius_meters=TRANSIT_RADIUS_METERS, max_result_count=8)
     except (RuntimeError, error.URLError, error.HTTPError, TimeoutError, OSError) as exc:
         warnings.append(f"transit lookup failed for {listing.get('id')}: {exc}")
 
     try:
-        nearby_food = _search_nearby(latitude, longitude, FOOD_TYPES, radius_meters=1600, max_result_count=8)
+        nearby_food = _search_nearby(latitude, longitude, FOOD_TYPES, radius_meters=FOOD_RADIUS_METERS, max_result_count=10)
     except (RuntimeError, error.URLError, error.HTTPError, TimeoutError, OSError) as exc:
         warnings.append(f"food lookup failed for {listing.get('id')}: {exc}")
 
     try:
-        nearby_grocery = _search_nearby(latitude, longitude, GROCERY_TYPES, radius_meters=1400, max_result_count=5)
+        nearby_grocery = _search_nearby(latitude, longitude, GROCERY_TYPES, radius_meters=GROCERY_RADIUS_METERS, max_result_count=5)
     except (RuntimeError, error.URLError, error.HTTPError, TimeoutError, OSError) as exc:
         warnings.append(f"grocery lookup failed for {listing.get('id')}: {exc}")
 
+    transit_priority = bool(soft_preferences.get("transit_priority"))
+    preferred_transit_modes = [
+        str(mode).strip().lower()
+        for mode in soft_preferences.get("preferred_transit_modes", [])
+        if str(mode).strip()
+    ]
+    preferred_cuisines = soft_preferences.get("preferred_cuisines", [])
+    avoided_cuisines = soft_preferences.get("avoided_cuisines", [])
+
+    transit_breakdown = _classify_transit_places(nearby_transit)
+    transit_counts = transit_breakdown["counts"]
+    transit_examples_by_mode = transit_breakdown["examples"]
+
+    transit_score = _score_transit_places(nearby_transit, preferred_transit_modes, transit_breakdown)
+    food_score = _score_food_places(nearby_food, preferred_cuisines, avoided_cuisines)
+    grocery_score = _clip(len(nearby_grocery) / 4.0)
+
     commute_summaries: list[str] = []
-    commute_minutes: list[float] = []
-    travel_mode = "TRANSIT" if soft_preferences.get("transit_priority") else "DRIVE"
+    commute_minutes_list: list[float] = []
     for destination in resolved_destinations:
+        dest_lat = float(destination["latitude"])
+        dest_lon = float(destination["longitude"])
+        travel_mode = _resolve_travel_mode(latitude, longitude, dest_lat, dest_lon, transit_priority)
         try:
             minutes = _compute_commute_minutes(
                 origin_latitude=latitude,
                 origin_longitude=longitude,
-                destination_latitude=float(destination["latitude"]),
-                destination_longitude=float(destination["longitude"]),
+                destination_latitude=dest_lat,
+                destination_longitude=dest_lon,
                 travel_mode=travel_mode,
             )
         except (RuntimeError, error.URLError, error.HTTPError, TimeoutError, OSError) as exc:
@@ -461,51 +654,28 @@ def _enrich_listing(
 
         if minutes is None:
             continue
-        commute_minutes.append(minutes)
-        commute_summaries.append(f"{destination['name']}: {minutes:.0f} min")
+        commute_minutes_list.append(minutes)
+        commute_summaries.append(f"{destination['name']}: {minutes:.0f} min ({travel_mode.lower()})")
 
-    transit_score = _count_to_score(len(nearby_transit), saturation=5)
-    transit_breakdown = _classify_transit_places(nearby_transit)
-    transit_counts = transit_breakdown["counts"]
-    transit_examples_by_mode = transit_breakdown["examples"]
-    preferred_transit_modes = [
-        str(mode).strip().lower()
-        for mode in soft_preferences.get("preferred_transit_modes", [])
-        if str(mode).strip()
-    ]
-
-    if preferred_transit_modes:
-        preferred_transit_hits = sum(transit_counts.get(mode, 0) for mode in preferred_transit_modes)
-        transit_score = _count_to_score(preferred_transit_hits, saturation=max(2, len(preferred_transit_modes) * 2))
-        if transit_counts.get("transit_hub", 0):
-            transit_score = _clip(transit_score + min(0.1, 0.05 * transit_counts["transit_hub"]))
-
-    food_score = _count_to_score(len(nearby_food), saturation=7)
-    grocery_score = _count_to_score(len(nearby_grocery), saturation=4)
     commute_score_values = [
-        score
-        for score in (_commute_minutes_to_score(minutes) for minutes in commute_minutes)
-        if score is not None
+        s for s in (_commute_minutes_to_score(m) for m in commute_minutes_list) if s is not None
     ]
     avg_commute_score = (
-        sum(commute_score_values) / len(commute_score_values)
-        if commute_score_values
-        else None
+        sum(commute_score_values) / len(commute_score_values) if commute_score_values else None
     )
 
-    weighted_components: list[tuple[float, float]] = [(grocery_score, 0.15)]
-    weighted_components.append((transit_score, 0.25 if soft_preferences.get("transit_priority") else 0.15))
-    weighted_components.append((food_score, 0.25 if soft_preferences.get("food_scene_priority") else 0.15))
-    if avg_commute_score is not None:
-        weighted_components.append((avg_commute_score, 0.40))
+    has_commute = avg_commute_score is not None
+    weights = _compute_dynamic_weights(soft_preferences, has_commute)
 
-    detailed_location_score = sum(score * weight for score, weight in weighted_components) / sum(
-        weight for _, weight in weighted_components
+    detailed_location_score = (
+        transit_score * weights["transit"]
+        + food_score * weights["food"]
+        + grocery_score * weights["grocery"]
+        + (avg_commute_score * weights["commute"] if has_commute else 0.0)
     )
 
     enriched["location_context"] = {
         "google_maps_enriched": True,
-        "travel_mode": travel_mode,
         "nearby_transit_count": len(nearby_transit),
         "nearby_transit_examples": _collect_place_names(nearby_transit),
         "preferred_transit_modes": preferred_transit_modes,
@@ -515,6 +685,8 @@ def _enrich_listing(
         "nearby_train_examples": transit_examples_by_mode["train"],
         "nearby_bus_count": transit_counts["bus"],
         "nearby_bus_examples": transit_examples_by_mode["bus"],
+        "nearby_path_count": transit_counts["path"],
+        "nearby_path_examples": transit_examples_by_mode["path"],
         "nearby_transit_hub_count": transit_counts["transit_hub"],
         "nearby_transit_hub_examples": transit_examples_by_mode["transit_hub"],
         "nearby_food_count": len(nearby_food),
@@ -524,7 +696,7 @@ def _enrich_listing(
         "commute_destinations": [destination["name"] for destination in resolved_destinations],
         "commute_summaries": commute_summaries,
         "commute_summary": "; ".join(commute_summaries) if commute_summaries else "no live commute data",
-        "average_commute_minutes": round(sum(commute_minutes) / len(commute_minutes), 1) if commute_minutes else None,
+        "average_commute_minutes": round(sum(commute_minutes_list) / len(commute_minutes_list), 1) if commute_minutes_list else None,
     }
     enriched["detailed_location_score"] = round(_clip(detailed_location_score), 4)
     enriched["score_breakdown"] = dict(enriched.get("score_breakdown", {}))
@@ -601,4 +773,3 @@ def enrich_and_rerank_listings(
         "stage_two_llm_used": _llm_is_available(),
     }
     return enriched_listings, diagnostics
-

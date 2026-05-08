@@ -49,9 +49,9 @@ class ApartmentPreferences(BaseModel):
         default=False,
         description="Whether nearby public transportation or easy commuting is important.",
     )
-    preferred_transit_modes: list[Literal["subway", "train", "bus"]] = Field(
+    preferred_transit_modes: list[Literal["subway", "train", "bus", "path"]] = Field(
         default_factory=list,
-        description="Specific transit modes the user prefers, such as subway, train, or bus.",
+        description="Specific transit modes the user prefers, such as subway, train, bus, or path (PATH train connecting NYC to NJ).",
     )
     food_scene_priority: bool = Field(
         default=False,
@@ -60,6 +60,8 @@ class ApartmentPreferences(BaseModel):
     quiet_preference: bool = Field(default=False, description="Whether the user prefers a quiet place")
     review_min_rating: float | None = Field(default=None, description="Minimum review rating mentioned")
     room_type: str | None = Field(default=None, description="Room type: 'Entire home/apt' or 'Private room'")
+    preferred_cuisines: list[str] = Field(default_factory=list, description="Cuisine types or food styles the user enjoys, e.g. italian, sushi, mexican, vegan, fast food, pizza")
+    avoided_cuisines: list[str] = Field(default_factory=list, description="Cuisine types or food styles the user dislikes or wants to avoid")
     priority_weights: PreferenceWeights = Field(
         default_factory=PreferenceWeights,
         description="Weighting of review, amenities, purpose, neighborhood, and price based on the user's priorities.",
@@ -102,10 +104,15 @@ Examples:
  - If the user emphasizes specific amenities, increase amenity_match.
  - If the user emphasizes ratings or trust, increase review_rating.
 
+FOOD PREFERENCE INSTRUCTIONS:
+ - If the user mentions liking a cuisine or food type (e.g. "I love sushi", "lots of Italian places", "good coffee"), add it to preferred_cuisines.
+ - If the user mentions disliking or avoiding a food type (e.g. "no fast food", "hate chains", "avoid McDonald's"), add it to avoided_cuisines.
+ - Use simple lowercase labels: italian, japanese, sushi, chinese, mexican, indian, thai, french, american, fast food, pizza, cafe, bakery, vegan, vegetarian.
+
 COMMUTE, TRANSIT, AND LIFESTYLE INSTRUCTIONS:
  - If the user says they work in a place, study at a school, or commute to an area, add that place or school to commute_destinations.
  - If the user mentions subway access, public transit, easy commuting, or has commute destinations, set transit_priority to true.
- - Populate preferred_transit_modes when the user specifically prefers subway, train, or bus access.
+ - Populate preferred_transit_modes when the user specifically prefers subway, train, bus, or PATH train (PATH connects Manhattan to NJ — add "path" when the user mentions PATH, NJ commute, or Jersey City/Hoboken access).
  - If the user cares about restaurants, cafes, grocery access, dining, or the local food scene, set food_scene_priority to true.
  - Neighborhood intent is broader than exact neighborhood names; capture both literal area preferences and commute/lifestyle needs.
 """
@@ -151,9 +158,13 @@ def _build_preferences_dict(
     quiet_preference: bool,
     review_min_rating: float | None,
     room_type: str | None,
+    preferred_cuisines: list[str] | None = None,
+    avoided_cuisines: list[str] | None = None,
     priority_weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     normalized_weights = _normalize_priority_weights(priority_weights)
+    preferred_cuisines = preferred_cuisines or []
+    avoided_cuisines = avoided_cuisines or []
 
     raw_preferences = {
         "min_guests": min_guests,
@@ -204,6 +215,8 @@ def _build_preferences_dict(
         "priority_weights": normalized_weights,
         "amenity_strictness": 1.0,
         "expanded_neighborhood_search": False,
+        "preferred_cuisines": preferred_cuisines,
+        "avoided_cuisines": avoided_cuisines,
     }
 
     relaxable_constraints = {
@@ -261,6 +274,8 @@ def parse_preferences(user_query: str) -> dict[str, Any]:
             quiet_preference=result.quiet_preference,
             review_min_rating=result.review_min_rating,
             room_type=result.room_type,
+            preferred_cuisines=result.preferred_cuisines,
+            avoided_cuisines=result.avoided_cuisines,
             priority_weights=priority_weights,
         )
     except Exception as exc:

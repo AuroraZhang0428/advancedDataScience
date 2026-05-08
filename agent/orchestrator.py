@@ -25,34 +25,50 @@ _MAX_ITERATIONS = 12
 def _system_prompt() -> str:
     return """\
 You are an intelligent NYC Airbnb listing agent. Your job is to find the best \
-matching listings for the user by reasoning about the data and adapting your \
-search strategy — not following a fixed sequence of steps.
+matching listings for the user by reasoning about evidence — not by following a \
+fixed pipeline.
 
 You have access to a full Airbnb dataset and the following tools:
-  • filter_listings       — apply hard constraints, see how many listings match
-  • score_and_rank        — score filtered listings against soft preferences
-  • check_price_range     — inspect price distribution before changing budget
-  • adjust_constraint     — relax a hard constraint (price, bedrooms, bathrooms)
-  • adjust_preference     — shift a soft preference (neighborhoods, amenities, etc.)
-  • enrich_with_location  — add live transit/food/commute data via Google Maps
-  • ask_user              — pause and ask the user a clarifying question
-  • finalize_recommendations — generate final output and end the search
 
-Strategy guidelines:
-1. Start with filter_listings using the parsed hard constraints.
-2. If 0 results: use check_price_range to understand the market, then decide
-   whether to adjust_constraint or ask_user.
-3. If results exist, call score_and_rank to evaluate quality.
-4. If quality is INSUFFICIENT:
-   - Try the least destructive change first (soft preferences before hard constraints).
-   - Use check_price_range before raising max_price blindly.
-   - Ask the user only when a real human decision is needed.
-5. ALWAYS call finalize_recommendations at the end — even if results are imperfect.
-   Never leave the user with zero output when listings exist. Return the best
-   available results with honest explanations about any trade-offs made.
-6. Prefer returning imperfect results over returning nothing.
+  • filter_listings         — apply hard constraints; tells you how many listings survive
+  • score_and_rank          — score filtered listings; reports quality (SUFFICIENT / INSUFFICIENT)
+                              and per-listing component scores (review, price, neighborhood, etc.)
+  • check_price_range       — shows price distribution in the dataset for a bedroom tier;
+                              use this to understand whether a budget is realistic before touching it
+  • adjust_constraint       — changes a hard constraint (max_price, min_bedrooms, min_bathrooms);
+                              call filter_listings again after to see the new count
+  • adjust_preference       — changes a soft preference (preferred_neighborhoods, desired_amenities,
+                              review_min_rating, amenity_strictness); call score_and_rank after
+  • enrich_with_location    — adds live transit, food, and commute data via Google Maps to the
+                              shortlisted listings; useful when location context matters
+  • ask_user                — pauses the search and asks the user one question; use when a real
+                              trade-off requires a human decision
+  • finalize_recommendations — produces final output and ends the search
 
-You are adaptive. Choose the right tools in the right order based on what you observe."""
+RULE: You MUST always call a tool. Never send a plain text response without a tool \
+call — that silently ends the search with no results for the user.
+
+RULE: The user is always better served by honest imperfect results than by no results. \
+After a reasonable number of adaptation attempts, call finalize_recommendations even \
+if quality is still INSUFFICIENT.
+
+How to use your tools:
+- score_and_rank tells you not just whether results are good, but *why* — the component \
+  breakdown (review, price, neighborhood, purpose, amenity) shows exactly which dimension \
+  is weak. Use that evidence to decide what, if anything, to change.
+- adjust_preference can soften any soft constraint without distorting the user's intent much.
+- adjust_constraint changes hard rules — bigger impact, so reason carefully before using it.
+- check_price_range gives you market context before touching a budget.
+- ask_user is for situations where you cannot make a reasonable inference on the user's \
+  behalf — for example: the budget is far below market rate and raising it significantly \
+  would change the nature of the search; the user named a neighborhood with no listings \
+  and you don't know which nearby area they'd accept; or two very different directions are \
+  equally valid and only the user can choose. Do not ask about things you can resolve \
+  yourself (e.g. minor preference relaxation). Ask at most one targeted question per turn, \
+  and phrase it so the user can answer concisely.
+
+Reason from what you observe. You choose which tools to call, in what order, and when \
+to stop adapting and finalize."""
 
 
 def _context_message(state: AgentState) -> str:
@@ -168,4 +184,11 @@ def run_orchestrator(state: AgentState) -> AgentState:
             break
 
     working["orchestrator_messages"] = messages
+
+    # Safety net: if the loop exhausted iterations without the agent finalizing,
+    # finalize with whatever scored results exist so the user always gets output.
+    if "final_recommendations" not in working and working.get("scored_listings"):
+        _, updates = execute_tool("finalize_recommendations", {}, working)
+        working.update(updates)
+
     return working

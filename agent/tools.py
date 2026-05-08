@@ -169,10 +169,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "name": "finalize_recommendations",
             "description": (
                 "Generate the final recommendations with polished explanations and end the "
-                "search. ALWAYS call this eventually — even if quality is imperfect. "
-                "It is better to return the best available results with caveats than to "
-                "return nothing. Call this after scoring, or after exhausting reasonable "
-                "adaptations."
+                "search. Call this when you have ≥3 quality results or have exhausted "
+                "reasonable adaptation options."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -260,19 +258,52 @@ def _score_and_rank(args: dict, state: dict) -> tuple[str, dict]:
         good_score_threshold=DEFAULT_CONFIG.good_score_threshold,
     )
 
-    good_count = diagnostics.get("good_count", 0)
+    good_count = diagnostics.get("good_result_count", 0)
     quality_label = "SUFFICIENT" if sufficient else "INSUFFICIENT"
     top5 = ranked[:5]
-    lines = [
-        f"  {i}. {l.get('title', '?')} — score={l.get('score', 0):.2f}, "
-        f"${l.get('price', 0):.0f}/night, {l.get('neighborhood', '?')}"
-        for i, l in enumerate(top5, 1)
-    ]
+    lines = []
+    for i, l in enumerate(top5, 1):
+        bd = l.get("score_breakdown") or {}
+        parts = ", ".join(
+            f"{k.replace('_score', '').replace('_', ' ')}={v:.2f}"
+            for k, v in bd.items()
+            if isinstance(v, (int, float)) and k not in ("llm_fit", "google_maps_fit", "stage_two_llm_fit")
+        )
+        lines.append(
+            f"  {i}. {l.get('title', '?')} — overall={l.get('score', 0):.2f}, "
+            f"${l.get('price', 0):.0f}/night, {l.get('neighborhood', '?')} | {parts}"
+        )
+
+    # Hint which component is weakest across the top results so the agent knows what to relax
+    if top5:
+        component_keys = ["review_rating", "amenity_match", "purpose_alignment", "neighborhood_fit", "price_score"]
+        avg_by_component = {}
+        for k in component_keys:
+            vals = [float((l.get("score_breakdown") or {}).get(k, 0)) for l in top5 if k in (l.get("score_breakdown") or {})]
+            if vals:
+                avg_by_component[k] = sum(vals) / len(vals)
+        if avg_by_component:
+            weakest = min(avg_by_component, key=avg_by_component.get)
+            hint = f"Weakest component across top results: {weakest} (avg {avg_by_component[weakest]:.2f}). "
+            if weakest == "review_rating":
+                hint += "Consider lowering review_min_rating via adjust_preference."
+            elif weakest == "neighborhood_fit":
+                hint += "Consider expanding or removing preferred_neighborhoods via adjust_preference."
+            elif weakest == "amenity_match":
+                hint += "Consider lowering amenity_strictness via adjust_preference."
+            elif weakest == "price_score":
+                hint += "Consider checking price range, then adjusting max_price via adjust_constraint."
+        else:
+            hint = ""
+    else:
+        hint = ""
+
     obs = (
         f"Scored {len(ranked)} listings. Quality: {quality_label} "
         f"({good_count}/{DEFAULT_CONFIG.minimum_good_results} needed with "
         f"score ≥ {DEFAULT_CONFIG.good_score_threshold}).\n"
-        "Top 5 results:\n" + "\n".join(lines)
+        + (f"{hint}\n" if hint else "")
+        + "Top 5 results:\n" + "\n".join(lines)
     )
 
     return obs, {
