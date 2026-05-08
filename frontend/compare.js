@@ -1,21 +1,10 @@
 /**
- * compare.js — NestAI Comparison Mode
- *
- * Adds a "Compare" tab to the existing frontend that runs the same query
- * against all three search methods side-by-side:
- *   • Baseline 1 — Filter-Based (regex, no LLM)
- *   • Baseline 2 — LLM Chatbot  (single GPT-4o-mini call)
- *   • NestAI Agent              (full ReAct pipeline)
- *
- * Drop compare.js next to app.js and add one line to index.html:
- *   <script src="compare.js"></script>
- * (after app.js so window globals are available)
+ * compare.js — NestAI Comparison Mode (v2)
+ * Dark theme, fixed search input, proper panel toggle.
  */
 
 (function () {
   "use strict";
-
-  // ── Config ────────────────────────────────────────────────────────────────
 
   const ENDPOINTS = {
     filter: "/api/search/baseline-filter",
@@ -23,7 +12,7 @@
     agent:  "/api/search",
   };
 
-  const COLUMN_META = [
+  const COLUMNS = [
     {
       key:   "filter",
       label: "Baseline 1 · Filter",
@@ -47,85 +36,68 @@
     },
   ];
 
-  const DATASET_PATH = "matched_subset_dataset.csv";
-
-  // ── State ─────────────────────────────────────────────────────────────────
-
   const state = {
     results: { filter: null, llm: null, agent: null },
     loading: { filter: false, llm: false, agent: false },
-    errors:  { filter: null,  llm: null,  agent: null  },
-    timings: { filter: null,  llm: null,  agent: null  },
+    errors:  { filter: null, llm: null, agent: null },
+    timings: { filter: null, llm: null, agent: null },
   };
 
-  // ── DOM helpers ───────────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────
 
-  function el(tag, attrs = {}, ...children) {
+  function el(tag, attrs, ...children) {
     const node = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs)) {
+    for (const [k, v] of Object.entries(attrs || {})) {
       if (k === "className") node.className = v;
-      else if (k === "style")   Object.assign(node.style, v);
+      else if (k === "style") Object.assign(node.style, v);
       else if (k.startsWith("on")) node.addEventListener(k.slice(2).toLowerCase(), v);
       else node.setAttribute(k, v);
     }
-    for (const child of children) {
-      if (child == null) continue;
-      node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+    for (const c of children) {
+      if (c == null) continue;
+      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
     }
     return node;
   }
 
   function getApiKey() {
-    // Re-use whatever key the main app already has in its settings input
-    const keyInput =
-      document.getElementById("api-key-input") ||
-      document.querySelector('input[type="password"]') ||
-      document.querySelector('input[placeholder*="API"]');
-    return keyInput ? keyInput.value.trim() : "";
+    const stored = localStorage.getItem("nestai_api_key") || "";
+    if (stored) return stored;
+    const inp = document.querySelector('input[type="password"]');
+    return inp ? inp.value.trim() : "";
   }
 
-  function getQuery() {
-    const qInput =
-      document.getElementById("query-input") ||
-      document.querySelector('input[type="text"]') ||
-      document.querySelector("textarea");
-    return qInput ? qInput.value.trim() : "";
-  }
+  // ── API ───────────────────────────────────────────────────────────────────
 
-  // ── API calls ─────────────────────────────────────────────────────────────
-
-  async function fetchBaseline(method, query, apiKey) {
-    const url  = ENDPOINTS[method];
-    const body = { query, dataset: DATASET_PATH };
+  async function fetchMethod(method, query, apiKey) {
+    const body = { query, dataset: "matched_subset_dataset.csv" };
     if (method === "llm" || method === "agent") body.api_key = apiKey;
-
-    const t0       = performance.now();
-    const response = await fetch(url, {
-      method:  "POST",
+    const t0 = performance.now();
+    const res = await fetch(ENDPOINTS[method], {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify(body),
+      body: JSON.stringify(body),
     });
-
     const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({ error: response.statusText }));
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
       throw Object.assign(new Error(err.error || "Request failed"), { elapsed });
     }
-    const data = await response.json();
-    return { data, elapsed };
+    return { data: await res.json(), elapsed };
   }
 
-  // ── Rendering ─────────────────────────────────────────────────────────────
+  // ── Card rendering ────────────────────────────────────────────────────────
 
-  function renderCard(listing, meta, rank) {
-    const price    = listing.price != null ? `$${listing.price.toFixed(0)}/night` : "Price N/A";
-    const rating   = listing.review_rating != null ? `${Number(listing.review_rating).toFixed(2)}★` : "—";
-    const beds     = listing.bedrooms != null ? `${listing.bedrooms}BR` : "?BR";
-    const baths    = listing.bathrooms != null ? `${Number(listing.bathrooms).toFixed(1)}BA` : "?BA";
-    const nbhd     = listing.neighborhood || "—";
-    const amenities = (listing.amenities || []).slice(0, 4);
+  function renderCard(listing, meta, rank, agentExplanation) {
+    const price  = listing.price != null ? `$${Number(listing.price).toFixed(0)}/night` : "N/A";
+    const rating = listing.review_rating != null ? `${Number(listing.review_rating).toFixed(2)}★` : "—";
+    const beds   = listing.bedrooms != null ? `${listing.bedrooms}BR` : "?BR";
+    const baths  = listing.bathrooms != null ? `${Number(listing.bathrooms).toFixed(1)}BA` : "?BA";
+    const nbhd   = listing.neighborhood || "—";
+    const ams    = (listing.amenities || []).slice(0, 4);
+    const expl   = listing.llm_explanation || agentExplanation || null;
 
-    const card = el("div", { className: "cmp-card" },
+    return el("div", { className: "cmp-card" },
       el("div", { className: "cmp-card-rank", style: { background: meta.color } }, `#${rank}`),
       el("div", { className: "cmp-card-body" },
         el("div", { className: "cmp-card-title" }, listing.title || "Untitled"),
@@ -135,471 +107,271 @@
           el("span", { className: "cmp-tag" }, `${beds} · ${baths}`),
           el("span", { className: "cmp-tag" }, rating),
         ),
-        amenities.length
-          ? el("div", { className: "cmp-amenities" },
-              ...amenities.map(a => el("span", { className: "cmp-amenity" }, a))
-            )
-          : null,
-        listing.llm_explanation
-          ? el("div", { className: "cmp-explanation" }, `"${listing.llm_explanation}"`)
-          : null,
-        // NestAI agent explanations come via the parent result's explanations array
+        ams.length ? el("div", { className: "cmp-amenities" },
+          ...ams.map(a => el("span", { className: "cmp-amenity" }, a))
+        ) : null,
+        expl ? el("div", { className: "cmp-expl" }, `"${expl}"`) : null,
       )
     );
-    return card;
   }
 
-  function renderColumn(meta, colEl) {
-    const s        = state;
-    const loading  = s.loading[meta.key];
-    const error    = s.errors[meta.key];
-    const result   = s.results[meta.key];
-    const elapsed  = s.timings[meta.key];
+  function renderColumn(meta) {
+    const col = document.getElementById(`cmp-col-${meta.key}`);
+    if (!col) return;
+    const header = col.querySelector(".cmp-col-header");
+    col.innerHTML = "";
+    col.appendChild(header);
 
-    // Clear old content (keep header)
-    const header = colEl.querySelector(".cmp-col-header");
-    colEl.innerHTML = "";
-    colEl.appendChild(header);
-
-    if (loading) {
-      colEl.appendChild(el("div", { className: "cmp-spinner-wrap" },
+    if (state.loading[meta.key]) {
+      col.appendChild(el("div", { className: "cmp-spinner-wrap" },
         el("div", { className: "cmp-spinner" }),
         el("p", { className: "cmp-spinner-label" }, "Searching…"),
       ));
       return;
     }
-
-    if (error) {
-      colEl.appendChild(el("div", { className: "cmp-error" }, `⚠ ${error}`));
+    if (state.errors[meta.key]) {
+      col.appendChild(el("div", { className: "cmp-error" }, `⚠ ${state.errors[meta.key]}`));
       return;
     }
-
+    const result = state.results[meta.key];
     if (!result) return;
 
-    const recs  = result.recommendations || [];
-    const expl  = result.explanation || "";
-    const agent_explanations = result.explanations || [];
+    const recs    = result.recommendations || [];
+    const expls   = result.explanations || [];
+    const elapsed = state.timings[meta.key];
 
-    // Stats bar
-    colEl.appendChild(el("div", { className: "cmp-stats" },
-      el("span", { className: "cmp-stat" }, `${recs.length} results`),
-      elapsed ? el("span", { className: "cmp-stat" }, `${elapsed}s`) : null,
-      result.total_matched != null
-        ? el("span", { className: "cmp-stat" }, `${result.total_matched} matched`) : null,
-      result.listings_shown != null
-        ? el("span", { className: "cmp-stat" }, `${result.listings_shown} shown to LLM`) : null,
+    const stats = [
+      `${recs.length} results`,
+      elapsed ? `${elapsed}s` : null,
+      result.total_matched != null ? `${result.total_matched} matched` : null,
+      result.listings_shown != null ? `${result.listings_shown} shown to LLM` : null,
+    ].filter(Boolean);
+
+    col.appendChild(el("div", { className: "cmp-stats" },
+      ...stats.map(s => el("span", { className: "cmp-stat" }, s))
     ));
-
-    if (expl) {
-      colEl.appendChild(el("div", { className: "cmp-method-expl" }, expl));
+    if (result.explanation) {
+      col.appendChild(el("div", { className: "cmp-method-expl" }, result.explanation));
     }
-
     if (recs.length === 0) {
-      colEl.appendChild(el("div", { className: "cmp-empty" }, "No results returned."));
+      col.appendChild(el("div", { className: "cmp-empty" }, "No results returned."));
       return;
     }
-
     const list = el("div", { className: "cmp-cards" });
-    recs.forEach((listing, i) => {
-      const card = renderCard(listing, meta, i + 1);
-      // Attach agent explanation if available
-      if (meta.key === "agent" && agent_explanations[i]) {
-        const explBlock = el("div", { className: "cmp-explanation" },
-          `"${agent_explanations[i]}"`);
-        card.querySelector(".cmp-card-body").appendChild(explBlock);
-      }
-      list.appendChild(card);
-    });
-    colEl.appendChild(list);
+    recs.forEach((r, i) => list.appendChild(renderCard(r, meta, i + 1, expls[i])));
+    col.appendChild(list);
   }
 
-  function renderAllColumns() {
-    COLUMN_META.forEach(meta => {
-      const colEl = document.getElementById(`cmp-col-${meta.key}`);
-      if (colEl) renderColumn(meta, colEl);
-    });
-  }
-
-  // ── Search orchestration ──────────────────────────────────────────────────
+  // ── Search ────────────────────────────────────────────────────────────────
 
   async function runComparison(query) {
     const apiKey = getApiKey();
-
-    // Reset state
-    for (const m of COLUMN_META) {
+    for (const m of COLUMNS) {
       state.results[m.key] = null;
       state.errors[m.key]  = null;
       state.timings[m.key] = null;
       state.loading[m.key] = true;
     }
-    renderAllColumns();
+    COLUMNS.forEach(m => renderColumn(m));
 
-    // Fire all three requests concurrently
-    await Promise.allSettled(
-      COLUMN_META.map(async (meta) => {
-        try {
-          const { data, elapsed } = await fetchBaseline(meta.key, query, apiKey);
-          state.results[meta.key] = data;
-          state.timings[meta.key] = elapsed;
-        } catch (err) {
-          state.errors[meta.key] = err.message;
-          if (err.elapsed) state.timings[meta.key] = err.elapsed;
-        } finally {
-          state.loading[meta.key] = false;
-          const colEl = document.getElementById(`cmp-col-${meta.key}`);
-          if (colEl) renderColumn(meta, colEl);
-        }
-      })
-    );
+    await Promise.allSettled(COLUMNS.map(async (meta) => {
+      try {
+        const { data, elapsed } = await fetchMethod(meta.key, query, apiKey);
+        state.results[meta.key] = data;
+        state.timings[meta.key] = elapsed;
+      } catch (err) {
+        state.errors[meta.key]  = err.message;
+        if (err.elapsed) state.timings[meta.key] = err.elapsed;
+      } finally {
+        state.loading[meta.key] = false;
+        renderColumn(meta);
+      }
+    }));
   }
 
-  // ── Tab injection ─────────────────────────────────────────────────────────
-
-  function injectStyles() {
-    if (document.getElementById("cmp-styles")) return;
-    const style = document.createElement("style");
-    style.id = "cmp-styles";
-    style.textContent = `
-      /* ── Tab button ── */
-      #cmp-tab-btn {
-        cursor: pointer;
-        padding: 8px 18px;
-        border-radius: 20px;
-        border: 2px solid #2a9d8f;
-        background: transparent;
-        color: #2a9d8f;
-        font-size: 14px;
-        font-weight: 600;
-        letter-spacing: .3px;
-        transition: all .2s;
-        margin-left: 10px;
-      }
-      #cmp-tab-btn:hover, #cmp-tab-btn.active {
-        background: #2a9d8f;
-        color: #fff;
-      }
-
-      /* ── Comparison panel ── */
-      #cmp-panel {
-        display: none;
-        flex-direction: column;
-        gap: 16px;
-        padding: 20px;
-        max-width: 1400px;
-        margin: 0 auto;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      #cmp-panel.visible { display: flex; }
-
-      #cmp-header {
-        text-align: center;
-        margin-bottom: 8px;
-      }
-      #cmp-header h2 {
-        font-size: 22px;
-        font-weight: 700;
-        color: #1a1a2e;
-        margin: 0 0 4px;
-      }
-      #cmp-header p {
-        color: #666;
-        font-size: 14px;
-        margin: 0;
-      }
-
-      #cmp-search-row {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        background: #fff;
-        border-radius: 12px;
-        padding: 12px 16px;
-        box-shadow: 0 2px 12px rgba(0,0,0,.08);
-      }
-      #cmp-query-input {
-        flex: 1;
-        border: none;
-        outline: none;
-        font-size: 15px;
-        color: #222;
-        background: transparent;
-      }
-      #cmp-query-input::placeholder { color: #aaa; }
-      #cmp-search-btn {
-        padding: 8px 22px;
-        background: #2a9d8f;
-        color: #fff;
-        border: none;
-        border-radius: 8px;
-        font-size: 14px;
-        font-weight: 600;
-        cursor: pointer;
-        transition: background .2s;
-        white-space: nowrap;
-      }
-      #cmp-search-btn:hover { background: #21867a; }
-      #cmp-search-btn:disabled { background: #aaa; cursor: default; }
-
-      /* ── Columns ── */
-      #cmp-columns {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 16px;
-        align-items: start;
-      }
-      @media (max-width: 900px) {
-        #cmp-columns { grid-template-columns: 1fr; }
-      }
-
-      .cmp-col {
-        background: #fff;
-        border-radius: 14px;
-        box-shadow: 0 2px 14px rgba(0,0,0,.07);
-        overflow: hidden;
-        min-height: 200px;
-      }
-      .cmp-col-header {
-        padding: 14px 16px 10px;
-        border-bottom: 3px solid;
-      }
-      .cmp-col-header h3 {
-        margin: 0 0 4px;
-        font-size: 15px;
-        font-weight: 700;
-        color: #1a1a2e;
-      }
-      .cmp-col-header .cmp-badge {
-        display: inline-block;
-        padding: 2px 8px;
-        border-radius: 10px;
-        font-size: 11px;
-        font-weight: 600;
-        color: #fff;
-        margin-bottom: 6px;
-      }
-      .cmp-col-header .cmp-col-desc {
-        font-size: 12px;
-        color: #777;
-        line-height: 1.4;
-      }
-
-      /* ── Stats bar ── */
-      .cmp-stats {
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-        padding: 8px 16px;
-        background: #f8f9fa;
-        border-bottom: 1px solid #eee;
-      }
-      .cmp-stat {
-        font-size: 12px;
-        color: #555;
-        background: #e9ecef;
-        padding: 2px 8px;
-        border-radius: 10px;
-      }
-
-      /* ── Method explanation ── */
-      .cmp-method-expl {
-        padding: 8px 16px;
-        font-size: 12px;
-        color: #666;
-        border-bottom: 1px solid #f0f0f0;
-        font-style: italic;
-        line-height: 1.5;
-      }
-
-      /* ── Cards ── */
-      .cmp-cards { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
-
-      .cmp-card {
-        display: flex;
-        border: 1px solid #efefef;
-        border-radius: 10px;
-        overflow: hidden;
-        background: #fafafa;
-        transition: box-shadow .15s;
-      }
-      .cmp-card:hover { box-shadow: 0 3px 12px rgba(0,0,0,.1); }
-
-      .cmp-card-rank {
-        width: 32px;
-        min-width: 32px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: #fff;
-        font-size: 12px;
-        font-weight: 700;
-      }
-
-      .cmp-card-body { padding: 10px 12px; flex: 1; min-width: 0; }
-
-      .cmp-card-title {
-        font-size: 13px;
-        font-weight: 600;
-        color: #1a1a2e;
-        margin-bottom: 5px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .cmp-card-meta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 4px;
-        margin-bottom: 5px;
-      }
-
-      .cmp-tag {
-        font-size: 11px;
-        background: #eef0f3;
-        color: #444;
-        padding: 2px 7px;
-        border-radius: 8px;
-        white-space: nowrap;
-      }
-      .cmp-tag--price {
-        background: #e8f5e9;
-        color: #2e7d32;
-        font-weight: 600;
-      }
-
-      .cmp-amenities {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 3px;
-        margin-bottom: 4px;
-      }
-      .cmp-amenity {
-        font-size: 10px;
-        background: #e3f2fd;
-        color: #1565c0;
-        padding: 1px 6px;
-        border-radius: 6px;
-      }
-
-      .cmp-explanation {
-        font-size: 11px;
-        color: #666;
-        font-style: italic;
-        margin-top: 5px;
-        line-height: 1.4;
-      }
-
-      /* ── Spinner ── */
-      .cmp-spinner-wrap { display: flex; flex-direction: column; align-items: center; padding: 40px 20px; gap: 12px; }
-      .cmp-spinner {
-        width: 32px; height: 32px;
-        border: 3px solid #e0e0e0;
-        border-top-color: #2a9d8f;
-        border-radius: 50%;
-        animation: cmp-spin .8s linear infinite;
-      }
-      @keyframes cmp-spin { to { transform: rotate(360deg); } }
-      .cmp-spinner-label { font-size: 13px; color: #888; }
-
-      /* ── Error / empty ── */
-      .cmp-error { padding: 20px; color: #c62828; font-size: 13px; }
-      .cmp-empty { padding: 20px; color: #999; font-size: 13px; text-align: center; }
-    `;
-    document.head.appendChild(style);
+  async function handleSearch() {
+    const query = document.getElementById("cmp-query").value.trim();
+    if (!query) { alert("Please enter a search query."); return; }
+    const btn = document.getElementById("cmp-search-btn");
+    btn.disabled = true;
+    btn.textContent = "Searching…";
+    try { await runComparison(query); }
+    finally { btn.disabled = false; btn.textContent = "Compare All"; }
   }
+
+  // ── Build panel ───────────────────────────────────────────────────────────
 
   function buildPanel() {
-    const panel = el("div", { id: "cmp-panel" },
-      el("div", { id: "cmp-header" },
-        el("h2", {}, "🔍 Side-by-Side Comparison"),
-        el("p",  {}, "Run the same query through all three search methods at once."),
+    return el("div", { id: "cmp-panel" },
+      el("div", { className: "cmp-panel-header" },
+        el("div", { className: "cmp-panel-title" },
+          el("span", {}, "🔍"),
+          el("h2", {}, "Side-by-Side Comparison"),
+        ),
+        el("p", { className: "cmp-panel-sub" },
+          "Run the same query through all three search methods at once."
+        ),
       ),
-      el("div", { id: "cmp-search-row" },
+      el("div", { className: "cmp-search-row" },
         el("input", {
-          id:          "cmp-query-input",
-          type:        "text",
-          placeholder: "e.g. 2-bedroom with WiFi in Brooklyn under $200/night",
+          id: "cmp-query",
+          type: "text",
+          placeholder: "e.g. 2BR with WiFi in Brooklyn under $200/night",
+          onKeydown: e => { if (e.key === "Enter") handleSearch(); },
         }),
-        el("button", {
-          id:    "cmp-search-btn",
-          onClick: handleSearch,
-        }, "Compare All"),
+        el("button", { id: "cmp-search-btn", onClick: handleSearch }, "Compare All"),
       ),
       el("div", { id: "cmp-columns" },
-        ...COLUMN_META.map(meta =>
+        ...COLUMNS.map(meta =>
           el("div", { className: "cmp-col", id: `cmp-col-${meta.key}` },
             el("div", {
               className: "cmp-col-header",
-              style:     { borderBottomColor: meta.color },
+              style: { borderBottomColor: meta.color },
             },
-              el("div", { className: "cmp-badge", style: { background: meta.color } }, meta.badge),
+              el("span", { className: "cmp-badge", style: { background: meta.color } }, meta.badge),
               el("h3", {}, meta.label),
-              el("div", { className: "cmp-col-desc" }, meta.desc),
+              el("p", { className: "cmp-col-desc" }, meta.desc),
             )
           )
         )
       )
     );
-    return panel;
   }
 
-  async function handleSearch() {
-    const query = document.getElementById("cmp-query-input").value.trim();
-    if (!query) {
-      alert("Please enter a search query.");
-      return;
-    }
-    const btn = document.getElementById("cmp-search-btn");
-    btn.disabled = true;
-    btn.textContent = "Searching…";
-    try {
-      await runComparison(query);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Compare All";
-    }
-  }
+  // ── Styles ────────────────────────────────────────────────────────────────
 
-  function injectTabButton(mainContent) {
-    // Try to find the existing search button or nav area to append next to
-    const navArea =
-      document.querySelector(".nav-tabs") ||
-      document.querySelector(".tabs") ||
-      document.querySelector("nav") ||
-      document.querySelector("header");
+  function injectStyles() {
+    if (document.getElementById("cmp-styles")) return;
+    const s = document.createElement("style");
+    s.id = "cmp-styles";
+    s.textContent = `
+      #cmp-toggle-btn {
+        position: fixed; top: 16px; right: 16px; z-index: 1000;
+        padding: 9px 20px;
+        background: linear-gradient(135deg, #2a9d8f, #264653);
+        color: #fff; border: none; border-radius: 22px;
+        font-size: 14px; font-weight: 700; cursor: pointer;
+        letter-spacing: .3px;
+        box-shadow: 0 4px 16px rgba(42,157,143,.35);
+        transition: opacity .2s, transform .2s;
+      }
+      #cmp-toggle-btn:hover { opacity: .88; transform: translateY(-1px); }
 
-    const btn = el("button", {
-      id:      "cmp-tab-btn",
-      onClick: () => toggleComparePanel(mainContent),
-    }, "⚡ Compare Methods");
+      #cmp-panel {
+        display: none; position: fixed; inset: 0; z-index: 999;
+        background: #0d1117; overflow-y: auto;
+        padding: 72px 24px 48px; box-sizing: border-box;
+        color: #e6edf3; font-family: inherit;
+      }
+      #cmp-panel.visible { display: block; }
 
-    if (navArea) {
-      navArea.appendChild(btn);
-    } else {
-      // Fallback: prepend to body
-      document.body.insertBefore(btn, document.body.firstChild);
-    }
-    return btn;
-  }
+      .cmp-panel-header { text-align: center; margin-bottom: 24px; }
+      .cmp-panel-title {
+        display: flex; align-items: center; justify-content: center;
+        gap: 10px; margin-bottom: 6px;
+      }
+      .cmp-panel-title h2 { margin: 0; font-size: 26px; font-weight: 700; color: #e6edf3; }
+      .cmp-panel-sub { color: #8b949e; font-size: 14px; margin: 0; }
 
-  function toggleComparePanel(mainContent) {
-    const panel  = document.getElementById("cmp-panel");
-    const btn    = document.getElementById("cmp-tab-btn");
-    const isOpen = panel.classList.contains("visible");
+      .cmp-search-row {
+        display: flex; gap: 10px; align-items: center;
+        background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+        padding: 12px 16px; max-width: 860px; margin: 0 auto 28px;
+      }
+      #cmp-query {
+        flex: 1; border: none; outline: none;
+        font-size: 15px; color: #e6edf3; background: transparent;
+      }
+      #cmp-query::placeholder { color: #484f58; }
+      #cmp-search-btn {
+        padding: 9px 24px;
+        background: linear-gradient(135deg, #2a9d8f, #264653);
+        color: #fff; border: none; border-radius: 8px;
+        font-size: 14px; font-weight: 700; cursor: pointer;
+        white-space: nowrap; transition: opacity .2s;
+      }
+      #cmp-search-btn:hover { opacity: .85; }
+      #cmp-search-btn:disabled { opacity: .5; cursor: default; }
 
-    if (isOpen) {
-      panel.classList.remove("visible");
-      btn.classList.remove("active");
-      if (mainContent) mainContent.style.display = "";
-    } else {
-      panel.classList.add("visible");
-      btn.classList.add("active");
-      if (mainContent) mainContent.style.display = "none";
-      // Pre-fill the compare query with whatever is in the main search box
-      const q = getQuery();
-      if (q) document.getElementById("cmp-query-input").value = q;
-    }
+      #cmp-columns {
+        display: grid; grid-template-columns: repeat(3, 1fr);
+        gap: 16px; max-width: 1300px; margin: 0 auto; align-items: start;
+      }
+      @media (max-width: 900px) { #cmp-columns { grid-template-columns: 1fr; } }
+
+      .cmp-col {
+        background: #161b22; border: 1px solid #30363d;
+        border-radius: 14px; overflow: hidden; min-height: 120px;
+      }
+      .cmp-col-header { padding: 14px 16px 12px; border-bottom: 3px solid #30363d; }
+      .cmp-badge {
+        display: inline-block; padding: 2px 9px; border-radius: 10px;
+        font-size: 11px; font-weight: 700; color: #fff; margin-bottom: 6px;
+      }
+      .cmp-col-header h3 { margin: 0 0 4px; font-size: 15px; font-weight: 700; color: #e6edf3; }
+      .cmp-col-desc { font-size: 12px; color: #8b949e; margin: 0; line-height: 1.4; }
+
+      .cmp-stats {
+        display: flex; flex-wrap: wrap; gap: 6px;
+        padding: 8px 14px; background: #0d1117; border-bottom: 1px solid #21262d;
+      }
+      .cmp-stat {
+        font-size: 11px; color: #8b949e; background: #21262d;
+        padding: 2px 8px; border-radius: 10px;
+      }
+      .cmp-method-expl {
+        padding: 8px 14px; font-size: 11px; color: #8b949e;
+        font-style: italic; line-height: 1.5; border-bottom: 1px solid #21262d;
+      }
+
+      .cmp-cards { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+      .cmp-card {
+        display: flex; background: #0d1117; border: 1px solid #21262d;
+        border-radius: 10px; overflow: hidden; transition: border-color .15s;
+      }
+      .cmp-card:hover { border-color: #388bfd; }
+      .cmp-card-rank {
+        width: 30px; min-width: 30px;
+        display: flex; align-items: center; justify-content: center;
+        color: #fff; font-size: 11px; font-weight: 700;
+      }
+      .cmp-card-body { padding: 10px 12px; flex: 1; min-width: 0; }
+      .cmp-card-title {
+        font-size: 13px; font-weight: 600; color: #e6edf3; margin-bottom: 5px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .cmp-card-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
+      .cmp-tag {
+        font-size: 11px; background: #21262d; color: #8b949e;
+        padding: 2px 7px; border-radius: 8px; white-space: nowrap;
+      }
+      .cmp-tag--price { background: #1a3a2a; color: #3fb950; font-weight: 600; }
+      .cmp-amenities { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 4px; }
+      .cmp-amenity {
+        font-size: 10px; background: #1a2332; color: #79c0ff;
+        padding: 1px 6px; border-radius: 6px;
+      }
+      .cmp-expl { font-size: 11px; color: #8b949e; font-style: italic; margin-top: 4px; line-height: 1.4; }
+
+      .cmp-spinner-wrap { display: flex; flex-direction: column; align-items: center; padding: 40px 20px; gap: 12px; }
+      .cmp-spinner {
+        width: 28px; height: 28px;
+        border: 3px solid #21262d; border-top-color: #2a9d8f;
+        border-radius: 50%; animation: cmp-spin .8s linear infinite;
+      }
+      @keyframes cmp-spin { to { transform: rotate(360deg); } }
+      .cmp-spinner-label { font-size: 13px; color: #8b949e; }
+      .cmp-error { padding: 20px; color: #f85149; font-size: 13px; }
+      .cmp-empty { padding: 20px; color: #484f58; font-size: 13px; text-align: center; }
+
+      #cmp-close {
+        display: none; position: fixed; top: 18px; left: 20px; z-index: 1001;
+        background: #21262d; border: 1px solid #30363d; color: #e6edf3;
+        border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+      }
+      #cmp-close:hover { background: #30363d; }
+    `;
+    document.head.appendChild(s);
   }
 
   // ── Boot ──────────────────────────────────────────────────────────────────
@@ -607,26 +379,28 @@
   function init() {
     injectStyles();
 
-    // Identify the main content area to hide when compare is active
-    const mainContent =
-      document.getElementById("main-content") ||
-      document.querySelector(".results-container") ||
-      document.querySelector("main") ||
-      null;
+    // Remove old button if it exists
+    const old = document.getElementById("cmp-tab-btn");
+    if (old) old.remove();
 
-    // Build and insert the comparison panel
-    const panel = buildPanel();
+    const panel    = buildPanel();
+    const toggleBtn = el("button", { id: "cmp-toggle-btn" }, "⚡ Compare Methods");
+    const closeBtn  = el("button", { id: "cmp-close" }, "← Back to NestAI");
+
     document.body.appendChild(panel);
+    document.body.appendChild(toggleBtn);
+    document.body.appendChild(closeBtn);
 
-    // Inject the tab toggle button
-    injectTabButton(mainContent);
+    function toggle() {
+      const open = panel.classList.toggle("visible");
+      closeBtn.style.display  = open ? "block" : "none";
+      toggleBtn.textContent   = open ? "✕ Close" : "⚡ Compare Methods";
+    }
 
-    // Allow Enter key in compare query box
-    document.getElementById("cmp-query-input").addEventListener("keydown", e => {
-      if (e.key === "Enter") handleSearch();
-    });
+    toggleBtn.addEventListener("click", toggle);
+    closeBtn.addEventListener("click", toggle);
 
-    console.log("[NestAI Compare] Comparison mode loaded.");
+    console.log("[NestAI Compare v2] loaded.");
   }
 
   if (document.readyState === "loading") {
