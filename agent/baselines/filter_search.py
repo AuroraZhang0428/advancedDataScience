@@ -1,12 +1,8 @@
 """Baseline 1 — Filter-Based Search.
 
-Simulates a traditional rule-based apartment search engine:
-  1. Parse query with regex/keyword heuristics (no LLM).
-  2. Apply hard filters (price, bedrooms, neighborhood keyword).
-  3. Sort by price ascending (cheapest first) and return top-N.
-
-No semantic understanding, no soft scoring, no adaptive relaxation.
-This represents what a basic property-search website would do.
+Parse the user query with simple regex / keyword matching (no LLM).
+Apply hard filters, sort by price ascending, return top-N results.
+No semantic understanding, no scoring pipeline.
 """
 
 from __future__ import annotations
@@ -14,350 +10,296 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# ── Constants ─────────────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Regex-based preference extractor
-# ---------------------------------------------------------------------------
+_TOP_N = 10
 
-_PRICE_PATTERN = re.compile(
-    r"\$\s*(\d[\d,]*)"          # $200 or $1,500
-    r"(?:\s*[-–]\s*\$\s*(\d[\d,]*))?"  # optional range end
-    r"(?:\s*/\s*(?:night|nightly|mo(?:nth)?|month))?",
-    re.IGNORECASE,
-)
-_BEDROOM_PATTERN = re.compile(
-    r"(\d+)\s*(?:-\s*)?(?:bed(?:room)?s?|BR|br)\b", re.IGNORECASE
-)
-_BATHROOM_PATTERN = re.compile(
-    r"(\d+(?:\.\d+)?)\s*bath(?:room)?s?\b", re.IGNORECASE
-)
-_GUEST_PATTERN = re.compile(
-    r"(\d+)\s*(?:guest|person|people|pax)\b", re.IGNORECASE
-)
-
-# Common NYC neighborhoods for keyword match
-_NEIGHBORHOODS = [
-    "chelsea", "harlem", "williamsburg", "brooklyn", "queens",
-    "bronx", "manhattan", "lower east side", "upper east side",
-    "upper west side", "midtown", "downtown", "soho", "tribeca",
-    "astoria", "greenwich village", "west village", "hell's kitchen",
-    "hell kitchen", "park slope", "bushwick", "bed-stuy",
-    "bedford-stuyvesant", "long island city", "lic", "flushing",
-    "financial district", "fidi", "murray hill", "gramercy",
-    "east village", "noho", "nolita", "little italy", "chinatown",
-    "battery park", "inwood", "washington heights", "morningside",
-    "hamilton heights", "crown heights", "prospect heights",
-    "cobble hill", "boerum hill", "fort greene", "dumbo",
-    "red hook", "bay ridge", "sunset park", "flatbush",
-    "east new york", "jamaica", "jackson heights", "ridgewood",
-    "maspeth", "glendale", "forest hills", "rego park",
-    "sunnyside", "woodside", "elmhurst", "corona",
-]
-
-# Amenity keywords → normalized canonical name
-_AMENITY_KEYWORDS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bwifi\b|\bwi-fi\b|\bwireless\b|\binternet\b", re.IGNORECASE), "wifi"),
-    (re.compile(r"\bworkspace\b|\bdesk\b|\bwork from home\b|\bwfh\b|\bremote work\b", re.IGNORECASE), "workspace"),
-    (re.compile(r"\bgym\b|\bfitness\b|\bexercise\b", re.IGNORECASE), "gym"),
-    (re.compile(r"\bparking\b|\bgarage\b", re.IGNORECASE), "parking"),
-    (re.compile(r"\bpool\b|\bswimming\b", re.IGNORECASE), "pool"),
-    (re.compile(r"\bpet\b|\bdog\b|\bcat\b", re.IGNORECASE), "pets_allowed"),
-    (re.compile(r"\blaundry\b|\bwasher\b|\bdryer\b", re.IGNORECASE), "laundry"),
-    (re.compile(r"\bkitchen\b|\bcooking\b", re.IGNORECASE), "kitchen"),
-    (re.compile(r"\bdoorman\b", re.IGNORECASE), "doorman"),
-    (re.compile(r"\bair\s*condition\b|\bac\b|\ba/c\b", re.IGNORECASE), "air_conditioning"),
-]
-
-_BOROUGH_ALIASES: dict[str, list[str]] = {
-    "brooklyn": ["brooklyn"],
-    "manhattan": ["manhattan"],
-    "queens": ["queens"],
-    "bronx": ["bronx"],
-    "staten island": ["staten island"],
+# Amenity keywords mapped to normalised amenity names
+_AMENITY_KEYWORDS: dict[str, list[str]] = {
+    "wifi":      ["wifi", "wi-fi", "wireless", "internet"],
+    "workspace": ["workspace", "work space", "desk", "office", "remote work", "work from home", "wfh"],
+    "gym":       ["gym", "fitness", "workout"],
+    "laundry":   ["laundry", "washer", "dryer", "washing machine"],
+    "parking":   ["parking", "garage"],
+    "kitchen":   ["kitchen", "cook"],
+    "tv":        ["tv", "television"],
+    "ac":        ["ac", "air conditioning", "air conditioner"],
+    "pool":      ["pool", "swimming"],
+    "elevator":  ["elevator", "lift"],
 }
 
-_ROOM_TYPE_KEYWORDS = {
-    "entire": "Entire home/apt",
-    "whole": "Entire home/apt",
-    "full apartment": "Entire home/apt",
-    "private room": "Private room",
-    "shared room": "Shared room",
+# Neighbourhood aliases for popular NYC areas
+_NEIGHBOURHOOD_ALIASES: dict[str, list[str]] = {
+    "manhattan":    ["manhattan", "midtown", "downtown", "uptown", "upper east", "upper west",
+                     "harlem", "chelsea", "soho", "tribeca", "fidi", "financial district",
+                     "hell's kitchen", "hells kitchen", "east village", "west village",
+                     "lower east side", "les", "gramercy", "kips bay", "murray hill",
+                     "inwood", "washington heights"],
+    "brooklyn":     ["brooklyn", "williamsburg", "bushwick", "bedford", "park slope",
+                     "crown heights", "flatbush", "bay ridge", "cobble hill", "carroll gardens",
+                     "boerum hill", "dumbo", "greenpoint", "sunset park", "prospect"],
+    "queens":       ["queens", "astoria", "long island city", "lic", "flushing",
+                     "jackson heights", "jamaica", "forest hills", "ridgewood"],
+    "bronx":        ["bronx", "the bronx"],
+    "staten island":["staten island", "si"],
 }
 
-_BOROUGH_NAMES = {"brooklyn", "manhattan", "queens", "bronx", "staten island"}
+# Room type keywords
+_ROOM_TYPE_KEYWORDS: dict[str, list[str]] = {
+    "private room": ["private room", "private bedroom"],
+    "entire home":  ["entire", "whole apartment", "whole place", "whole home", "full apartment"],
+    "shared room":  ["shared room", "shared space", "hostel", "dorm"],
+}
 
-_MONTHLY_KEYWORDS = re.compile(
-    r"\bper\s+month\b|\bmonthly\b|\b/mo\b|\b/month\b", re.IGNORECASE
-)
+
+# ── Regex helpers ─────────────────────────────────────────────────────────────
+
+def _extract_price(query: str) -> float | None:
+    """Return max nightly price from the query, or None if not mentioned."""
+    patterns = [
+        r"\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:/\s*night|per\s*night|a\s*night)?",
+        r"(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:dollars?|bucks?)\s*(?:a|per)?\s*night",
+        r"under\s+\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)",
+        r"below\s+\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)",
+        r"less\s+than\s+\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)",
+        r"max(?:imum)?\s+(?:of\s+)?\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)",
+        r"budget(?:\s+of)?\s+\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)",
+        r"(?:no more|not more) than\s+\$?\s*(\d+(?:,\d{3})*(?:\.\d+)?)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, query, re.IGNORECASE)
+        if m:
+            return float(m.group(1).replace(",", ""))
+    return None
 
 
-def _parse_price(query: str) -> dict[str, Any]:
+def _extract_bedrooms(query: str) -> int | None:
+    """Return minimum bedrooms requested, or None."""
+    patterns = [
+        r"(\d+)\s*[-–]?\s*bed(?:room)?s?",
+        r"(\d+)\s*br\b",
+        r"(\d+)\s*bedroom",
+    ]
+    for pat in patterns:
+        m = re.search(pat, query, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    # Keywords
+    if re.search(r"\bstudio\b", query, re.IGNORECASE):
+        return 0
+    return None
 
-    """Extract price ceiling and whether it's monthly."""
-    monthly = bool(_MONTHLY_KEYWORDS.search(query))
-    matches = _PRICE_PATTERN.findall(query)
-    if not matches:
-        return {}
 
-    amounts: list[float] = []
-    for m in matches:
-        for part in m:
-            if part:
-                try:
-                    amounts.append(float(part.replace(",", "")))
-                except ValueError:
-                    pass
+def _extract_min_rating(query: str) -> float | None:
+    """Return minimum review rating, or None."""
+    patterns = [
+        r"(\d(?:\.\d+)?)\s*\+?\s*(?:stars?|rating|rated|score)",
+        r"rated?\s+(\d(?:\.\d+)?)\s*\+",
+        r"above\s+(\d(?:\.\d+)?)\s*(?:stars?)?",
+        r"at\s+least\s+(\d(?:\.\d+)?)\s*(?:stars?)?",
+    ]
+    for pat in patterns:
+        m = re.search(pat, query, re.IGNORECASE)
+        if m:
+            val = float(m.group(1))
+            # Normalise: if on a 5-star scale keep as-is, else assume 100-scale
+            if val <= 5:
+                return val
+            return val / 20.0  # e.g. "90 rating" → 4.5 stars
+    # "good reviews" / "highly rated" → implicit ≥ 4.0
+    if re.search(r"\b(good|great|excellent|high(?:ly)?)\s*(?:reviews?|rated?|rating)\b", query, re.IGNORECASE):
+        return 4.0
+    return None
 
-    if not amounts:
-        return {}
 
-    max_price = max(amounts)
-    if monthly:
-        max_price = max_price / 30.0  # convert to nightly for dataset comparison
+def _extract_amenities(query: str) -> list[str]:
+    """Return list of amenity keys that appear in the query."""
+    found = []
+    q = query.lower()
+    for amenity, keywords in _AMENITY_KEYWORDS.items():
+        if any(kw in q for kw in keywords):
+            found.append(amenity)
+    return found
 
-    return {"max_price": max_price, "price_period": "monthly" if monthly else "nightly"}
 
+def _extract_neighborhoods(query: str) -> list[str]:
+    """Return list of canonical neighbourhood names (borough or specific) from query."""
+    found = []
+    q = query.lower()
+    for canonical, aliases in _NEIGHBOURHOOD_ALIASES.items():
+        if any(alias in q for alias in aliases):
+            found.append(canonical)
+    # Also catch direct neighbourhood name fragments not in the alias table
+    # (just re-search for capitalised words near location indicators)
+    loc_m = re.findall(
+        r"(?:in|near|around|at)\s+([A-Za-z][A-Za-z\s]{1,30}?)(?:\s+area|,|\band\b|$)",
+        query, re.IGNORECASE
+    )
+    for raw in loc_m:
+        cleaned = raw.strip().lower()
+        if cleaned and cleaned not in found and len(cleaned) > 2:
+            found.append(cleaned)
+    return list(dict.fromkeys(found))  # deduplicate, preserve order
+
+
+def _extract_room_type(query: str) -> str | None:
+    """Return 'private room', 'entire home', or 'shared room' if mentioned."""
+    q = query.lower()
+    for canonical, keywords in _ROOM_TYPE_KEYWORDS.items():
+        if any(kw in q for kw in keywords):
+            return canonical
+    return None
+
+
+# ── Parsing ───────────────────────────────────────────────────────────────────
 
 def parse_query(query: str) -> dict[str, Any]:
-    """
-    Heuristic rule-based parser. Returns structured constraints.
-    Intentionally simple: no LLM, no context, no disambiguation.
-    """
-    constraints: dict[str, Any] = {
-        "max_price": None,
-        "min_bedrooms": None,
-        "min_bathrooms": None,
-        "min_guests": None,
-        "neighborhoods": [],
-        "amenities": [],
-        "room_type": None,
-        "price_period": "nightly",
+    """Parse a natural-language query into a flat dict of hard constraints."""
+    return {
+        "max_price":      _extract_price(query),
+        "min_bedrooms":   _extract_bedrooms(query),
+        "min_rating":     _extract_min_rating(query),
+        "amenities":      _extract_amenities(query),
+        "neighborhoods":  _extract_neighborhoods(query),
+        "room_type":      _extract_room_type(query),
     }
 
+
+# ── Filtering ─────────────────────────────────────────────────────────────────
+
+def _listing_matches(listing: dict[str, Any], constraints: dict[str, Any]) -> bool:
+    """Return True if the listing satisfies all extracted hard constraints."""
+
     # Price
-    price_info = _parse_price(query)
-    constraints.update(price_info)
+    max_price = constraints["max_price"]
+    if max_price is not None:
+        price = listing.get("price")
+        if price is None or float(price) > max_price:
+            return False
 
     # Bedrooms
-    br = _BEDROOM_PATTERN.search(query)
-    if br:
-        constraints["min_bedrooms"] = int(br.group(1))
+    min_beds = constraints["min_bedrooms"]
+    if min_beds is not None:
+        beds = listing.get("bedrooms")
+        if beds is None or int(beds) < min_beds:
+            return False
 
-    # Bathrooms
-    ba = _BATHROOM_PATTERN.search(query)
-    if ba:
-        constraints["min_bathrooms"] = float(ba.group(1))
+    # Rating
+    min_rating = constraints["min_rating"]
+    if min_rating is not None:
+        rating = listing.get("review_rating") or listing.get("review_scores_rating")
+        if rating is None or float(rating) < min_rating:
+            return False
 
-    # Guests
-    gu = _GUEST_PATTERN.search(query)
-    if gu:
-        constraints["min_guests"] = int(gu.group(1))
+    # Amenities (all must be present)
+    for amenity in constraints["amenities"]:
+        # Check the amenities list field
+        amenities_list = [a.lower() for a in (listing.get("amenities") or [])]
+        # Also check boolean shortcut fields (wifi, workspace)
+        bool_val = listing.get(amenity)
+        if amenity not in amenities_list and not bool_val:
+            return False
 
-    # Neighborhoods — simple substring match
-    ql = query.lower()
-    found_hoods = [n for n in _NEIGHBORHOODS if n in ql]
-    constraints["neighborhoods"] = found_hoods
-
-    # Amenities
-    found_amenities: list[str] = []
-    for pattern, canonical in _AMENITY_KEYWORDS:
-        if pattern.search(query):
-            found_amenities.append(canonical)
-    constraints["amenities"] = found_amenities
+    # Neighbourhoods (at least one must match)
+    neighbourhoods = constraints["neighborhoods"]
+    if neighbourhoods:
+        nbhd = (listing.get("neighborhood") or listing.get("neighbourhood") or
+                listing.get("neighborhood_group") or "").lower()
+        nbhd_group = (listing.get("neighborhood_group") or "").lower()
+        matched = False
+        for n in neighbourhoods:
+            if n in nbhd or n in nbhd_group:
+                matched = True
+                break
+        if not matched:
+            return False
 
     # Room type
-    for kw, rt in _ROOM_TYPE_KEYWORDS.items():
-        if kw in ql:
-            constraints["room_type"] = rt
-            break
+    room_type = constraints["room_type"]
+    if room_type is not None:
+        rt = (listing.get("room_type") or "").lower()
+        if room_type not in rt:
+            return False
 
-    return constraints
-
-
-# ---------------------------------------------------------------------------
-# Filter + sort pipeline
-# ---------------------------------------------------------------------------
-
-def _safe_float(v: Any) -> float | None:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+    return True
 
 
-def _listing_matches_neighborhood(
-    listing: dict[str, Any],
-    neighborhoods: list[str],
-) -> bool:
-    """Return True if the listing matches any of the requested neighborhood keywords."""
-    hood = str(listing.get("neighborhood") or "").lower()
-    hood_group = str(listing.get("neighborhood_group") or "").lower()
-    for n in neighborhoods:
-        if n in hood or hood in n:
-            return True
-        # Borough-level match: 'brooklyn' matches neighborhood_group='Brooklyn'
-        if n in hood_group or hood_group in n:
-            return True
-        # Fuzzy: check if target neighborhood name contains the search term
-        if n in _BOROUGH_NAMES and n in hood_group:
-            return True
-    return False
+# ── Serialisation ─────────────────────────────────────────────────────────────
+
+def _serialise_listing(listing: dict[str, Any]) -> dict[str, Any]:
+    price = listing.get("price")
+    return {
+        "id":               listing.get("id", ""),
+        "title":            listing.get("title", "Untitled"),
+        "neighborhood":     listing.get("neighborhood") or listing.get("neighbourhood") or
+                            listing.get("neighborhood_group") or "Unknown area",
+        "neighborhood_group": listing.get("neighborhood_group", ""),
+        "price":            float(price) if price is not None else None,
+        "bedrooms":         listing.get("bedrooms"),
+        "bathrooms":        listing.get("bathrooms"),
+        "review_rating":    listing.get("review_rating"),
+        "amenities":        listing.get("amenities", []),
+        "wifi":             listing.get("wifi"),
+        "workspace":        listing.get("workspace"),
+        "latitude":         listing.get("latitude"),
+        "longitude":        listing.get("longitude"),
+        "room_type":        listing.get("room_type"),
+        "score":            0.0,  # No scoring in this baseline
+        "score_breakdown":  {},
+    }
 
 
-def _listing_has_amenity(listing: dict[str, Any], amenity: str) -> bool:
-    """Check amenity presence via both the amenities list and boolean fields."""
-    listing_amenities = {str(a).lower() for a in listing.get("amenities", [])}
-    if amenity in listing_amenities:
-        return True
-    # Boolean field fallbacks
-    if amenity == "wifi" and listing.get("wifi"):
-        return True
-    if amenity == "workspace" and listing.get("workspace"):
-        return True
-    return False
+# ── Public entry point ────────────────────────────────────────────────────────
 
+def run_filter_baseline(listings: list[dict[str, Any]], query: str, top_n: int = _TOP_N) -> dict[str, Any]:
+    """Run the filter-based baseline and return a response dict.
 
-def filter_and_sort(
-    listings: list[dict[str, Any]],
-    constraints: dict[str, Any],
-    top_n: int = 5,
-) -> list[dict[str, Any]]:
-    """
-    Apply hard filters then sort by price ascending.
-    Mimics a simple property portal: exact match filters, cheapest first.
-    """
-    max_price = _safe_float(constraints.get("max_price"))
-    min_bedrooms = _safe_float(constraints.get("min_bedrooms"))
-    min_bathrooms = _safe_float(constraints.get("min_bathrooms"))
-    min_guests = _safe_float(constraints.get("min_guests"))
-    neighborhoods = [n.lower() for n in (constraints.get("neighborhoods") or [])]
-    amenities = [a.lower() for a in (constraints.get("amenities") or [])]
-    room_type = constraints.get("room_type")
+    Args:
+        listings: Pre-loaded list of listing dicts (from agent.services.dataset).
+        query:    Raw user query string.
+        top_n:    Maximum number of results to return.
 
-    filtered: list[dict[str, Any]] = []
-
-    for listing in listings:
-        price = _safe_float(listing.get("price"))
-        bedrooms = _safe_float(listing.get("bedrooms"))
-        bathrooms = _safe_float(listing.get("bathrooms"))
-        accommodates = _safe_float(listing.get("accommodates"))
-        hood = str(listing.get("neighborhood") or listing.get("neighborhood_group") or "").lower()
-        listing_rt = str(listing.get("raw", {}).get("room_type") or "").lower()
-
-        # Hard price filter
-        if max_price is not None and (price is None or price > max_price):
-            continue
-        # Hard bedroom filter
-        if min_bedrooms is not None and (bedrooms is None or bedrooms < min_bedrooms):
-            continue
-        # Hard bathroom filter
-        if min_bathrooms is not None and (bathrooms is None or bathrooms < min_bathrooms):
-            continue
-        # Hard guest filter
-        if min_guests is not None and (accommodates is None or accommodates < min_guests):
-            continue
-        # Room type filter (exact keyword match)
-        if room_type and listing_rt and room_type.lower() not in listing_rt:
-            continue
-        # Neighborhood filter — keyword substring match + borough-level match
-        if neighborhoods and not _listing_matches_neighborhood(listing, neighborhoods):
-            continue
-        # Amenity filter — must have ALL specified amenities (with boolean-field fallback)
-        if amenities and not all(_listing_has_amenity(listing, a) for a in amenities):
-            continue
-
-        filtered.append(listing)
-
-    # Sort: price ascending (cheapest first) — this is the typical portal behavior
-    filtered.sort(key=lambda l: (_safe_float(l.get("price")) or 9999.0))
-
-    return filtered[:top_n]
-
-
-def run_filter_baseline(
-    listings: list[dict[str, Any]],
-    query: str,
-    top_n: int = 5,
-) -> dict[str, Any]:
-    """
-    End-to-end filter baseline: parse → filter → sort → return results.
-
-    Returns a dict with keys matching the NestAI API response shape so
-    the frontend comparison view can render it identically.
+    Returns:
+        Dict suitable for JSON serialisation with keys:
+          - recommendations: list of serialised listings (price-sorted)
+          - parsed_constraints: what the regex parser extracted
+          - method: "baseline-filter"
+          - total_matched: how many listings survived filtering
+          - explanation: brief human-readable summary
     """
     constraints = parse_query(query)
-    results = filter_and_sort(listings, constraints, top_n=top_n)
 
-    # Build a simple trace to explain what happened
-    trace: list[dict[str, str]] = [
-        {
-            "step": "Parsed query with regex rules",
-            "detail": (
-                f"Extracted constraints via keyword/regex matching — "
-                f"no LLM or semantic understanding used."
-            ),
-        },
-        {
-            "step": "Applied hard filters",
-            "detail": (
-                f"Filtered {len(listings):,} listings with exact rules: "
-                + ", ".join(
-                    f"{k}={v}"
-                    for k, v in constraints.items()
-                    if v not in (None, [], "")
-                )
-                or "no constraints extracted"
-            ),
-        },
-        {
-            "step": "Sorted by price (ascending)",
-            "detail": (
-                f"No semantic scoring. Returned top {len(results)} listings "
-                f"sorted cheapest-first from {len(listings):,} candidates."
-            ),
-        },
-    ]
+    matched = [l for l in listings if _listing_matches(l, constraints)]
 
-    # Serialize results in the same shape as the NestAI agent
-    serialized = []
-    for r in results:
-        price = r.get("price")
-        serialized.append({
-            "id": r.get("id", ""),
-            "title": r.get("title", "Untitled"),
-            "neighborhood": r.get("neighborhood") or r.get("neighborhood_group") or "Unknown",
-            "neighborhood_group": r.get("neighborhood_group", ""),
-            "price": float(price) if price is not None else None,
-            "bedrooms": r.get("bedrooms"),
-            "bathrooms": r.get("bathrooms"),
-            "review_rating": r.get("review_rating"),
-            "amenities": r.get("amenities", []),
-            "wifi": r.get("wifi"),
-            "workspace": r.get("workspace"),
-            "quiet_score": r.get("quiet_score"),
-            "purpose_tags": r.get("purpose_tags", []),
-            "score": 0.0,                      # no composite score computed
-            "score_breakdown": {},
-            "llm_fit_score": None,
-            "llm_rank_reason": None,
-            "deterministic_score": None,
-            "latitude": r.get("latitude"),
-            "longitude": r.get("longitude"),
-        })
+    # Sort by price ascending (cheapest first); put None prices last
+    matched.sort(key=lambda l: (l.get("price") is None, float(l.get("price") or 0)))
+
+    top = matched[:top_n]
+
+    serialised = [_serialise_listing(l) for l in top]
+
+    # Build a human-readable summary of what was parsed
+    parts: list[str] = []
+    if constraints["max_price"] is not None:
+        parts.append(f"max price ${constraints['max_price']:.0f}/night")
+    if constraints["min_bedrooms"] is not None:
+        parts.append(f"≥{constraints['min_bedrooms']} bedroom(s)")
+    if constraints["min_rating"] is not None:
+        parts.append(f"≥{constraints['min_rating']:.1f}★ rating")
+    if constraints["amenities"]:
+        parts.append(f"amenities: {', '.join(constraints['amenities'])}")
+    if constraints["neighborhoods"]:
+        parts.append(f"area: {', '.join(constraints['neighborhoods'])}")
+    if constraints["room_type"]:
+        parts.append(f"room type: {constraints['room_type']}")
+
+    summary = f"Applied {len(parts)} filter(s): {'; '.join(parts)}." if parts else "No specific filters detected — returning cheapest listings."
+    summary += f" {len(matched)} listing(s) matched; showing top {len(serialised)}."
 
     return {
-        "baseline": "filter",
-        "baseline_label": "Filter-Based Search",
-        "baseline_description": (
-            "Traditional rule-based search: regex/keyword parsing, "
-            "exact hard filters, sorted by price ascending. "
-            "No AI, no soft scoring, no adaptive relaxation."
-        ),
-        "parsed_constraints": constraints,
-        "recommendations": serialized,
-        "explanations": [],
-        "agent_trace": trace,
-        "relaxation_history": [],
-        "need_user_input": False,
-        "user_question": None,
+        "recommendations":   serialised,
+        "parsed_constraints": {k: v for k, v in constraints.items() if v not in (None, [], "")},
+        "method":            "baseline-filter",
+        "total_matched":     len(matched),
+        "explanation":       summary,
     }
