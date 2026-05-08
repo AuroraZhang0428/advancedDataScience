@@ -7,9 +7,13 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from pathlib import Path
+
+# Load .env before anything else so OPENAI_API_KEY is available to all services
+load_dotenv()
 
 from agent.config import DEFAULT_CONFIG
 from agent.graph import build_graph
@@ -298,10 +302,8 @@ def search():
     if not dataset_path.exists():
         return jsonify({"error": f"Dataset not found: {dataset_path}"}), 400
 
-    if api_key:
-        os.environ["OPENAI_API_KEY"] = api_key
-    elif "OPENAI_API_KEY" not in os.environ:
-        os.environ.pop("OPENAI_API_KEY", None)
+    # api_key from the request is ignored — key lives in .env on the server
+    # (os.environ["OPENAI_API_KEY"] is already set by load_dotenv at startup)
 
     try:
         graph = get_graph()

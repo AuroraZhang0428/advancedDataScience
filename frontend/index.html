@@ -19,7 +19,7 @@
         <span class="logo-text">Nest<span class="logo-accent">AI</span></span>
       </div>
       <nav class="nav">
-        <button class="nav-btn" id="settingsToggle" title="API Settings">
+        <button class="nav-btn" id="settingsToggle" title="Settings">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="3"></circle>
             <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"></path>
@@ -38,11 +38,7 @@
       <button class="close-btn" id="settingsClose">✕</button>
     </div>
     <div class="settings-body">
-      <label class="field-label">OpenAI API Key <span class="optional">(optional — enables AI-powered explanations)</span></label>
-      <input type="password" id="apiKeyInput" class="text-input" placeholder="sk-..." autocomplete="off" />
-      <p class="hint">Without a key, the agent uses deterministic rule-based parsing and explanations.</p>
-
-      <label class="field-label" style="margin-top:1.5rem;">Dataset CSV Path</label>
+      <label class="field-label">Dataset CSV Path</label>
       <input type="text" id="datasetInput" class="text-input" placeholder="matched_subset_dataset.csv" value="matched_subset_dataset.csv" />
       <p class="hint">Path to the cleaned rental dataset CSV file (relative to project root).</p>
     </div>

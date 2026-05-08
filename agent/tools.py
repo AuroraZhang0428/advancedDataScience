@@ -169,8 +169,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "name": "finalize_recommendations",
             "description": (
                 "Generate the final recommendations with polished explanations and end the "
-                "search. Call this when you have ≥3 quality results or have exhausted "
-                "reasonable adaptation options."
+                "search. ALWAYS call this eventually — even if quality is imperfect. "
+                "It is better to return the best available results with caveats than to "
+                "return nothing. Call this after scoring, or after exhausting reasonable "
+                "adaptations."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -392,8 +394,14 @@ def _ask_user(args: dict, state: dict) -> tuple[str, dict]:
 
 def _finalize_recommendations(args: dict, state: dict) -> tuple[str, dict]:
     scored = state.get("scored_listings", [])
+
+    # Safety net: if score_and_rank was never called, use filtered listings directly
     if not scored:
-        return "No scored listings available. Call score_and_rank first.", {}
+        filtered = state.get("filtered_listings", [])
+        if filtered:
+            scored = sorted(filtered, key=lambda l: float(l.get("review_rating") or 0), reverse=True)
+        else:
+            return "No listings available to finalize. The search found no matching results.", {}
 
     recommendations, explanations = generate_final_output(
         scored_listings=scored,

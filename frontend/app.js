@@ -3,7 +3,6 @@
   "use strict";
 
   const API = "";
-  let savedApiKey = "";
   let savedDataset = "matched_subset_dataset.csv";
   let lastBaseQuery = "";
   let lastAgentResult = null;
@@ -50,7 +49,6 @@
   $("settingsClose").addEventListener("click", closeSettings);
   settingsOverlay.addEventListener("click", closeSettings);
   $("saveSettings").addEventListener("click", () => {
-    savedApiKey = $("apiKeyInput").value.trim();
     savedDataset = $("datasetInput").value.trim() || "matched_subset_dataset.csv";
     closeSettings();
   });
@@ -82,7 +80,7 @@
       const res = await fetch(API + "/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, api_key: savedApiKey, dataset: savedDataset }),
+        body: JSON.stringify({ query, dataset: savedDataset }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Search failed");
@@ -158,7 +156,7 @@
       var chatbotPromise = fetch(API + "/api/search/baseline-llm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: query, api_key: savedApiKey, dataset: savedDataset }),
+        body: JSON.stringify({ query, dataset: savedDataset }),
       }).then(function (r) { return r.json(); });
 
       var results = await Promise.allSettled([filterPromise, chatbotPromise]);

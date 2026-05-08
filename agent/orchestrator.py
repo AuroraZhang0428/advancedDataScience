@@ -47,8 +47,10 @@ Strategy guidelines:
    - Try the least destructive change first (soft preferences before hard constraints).
    - Use check_price_range before raising max_price blindly.
    - Ask the user only when a real human decision is needed.
-5. Call finalize_recommendations when quality is SUFFICIENT or you've made
-   reasonable adaptations and further changes would distort the user's intent.
+5. ALWAYS call finalize_recommendations at the end — even if results are imperfect.
+   Never leave the user with zero output when listings exist. Return the best
+   available results with honest explanations about any trade-offs made.
+6. Prefer returning imperfect results over returning nothing.
 
 You are adaptive. Choose the right tools in the right order based on what you observe."""
 
