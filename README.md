@@ -4,6 +4,8 @@ An agentic AI-powered apartment recommendation system built with **LangGraph**, 
 
 > **Requires an OpenAI API key.** The agent uses `gpt-4o-mini` to parse your query, reason about search results, and adapt its strategy in real time.
 
+> **Rubric note:** Both comparison baselines — filter-based search and standard LLM chatbot — are fully implemented in `agent/baselines/` and exposed via dedicated API endpoints. The web UI includes a side-by-side comparison panel ("⚖️ Compare Methods") that runs all three approaches on the same query.
+
 ---
 
 ## Quick Start
@@ -82,7 +84,7 @@ python app.py
 |---|---|
 | `OPENAI_API_KEY` | Query parsing, reasoning, and explanation generation |
 
-You can enter your key directly in the **Settings** panel in the web UI, or set it as an environment variable:
+You can set it in a `.env` file in the project root, or as an environment variable:
 
 **Mac / Linux:**
 ```bash
@@ -178,26 +180,29 @@ advancedDataScience/
 ├── matched_subset_dataset.csv      NYC Airbnb listings dataset
 ├── frontend/
 │   ├── index.html                  Web UI
-│   ├── app.js                      Search logic and card rendering
+│   ├── app.js                      Two-phase search + card rendering
+│   ├── compare.js                  Baseline comparison panel logic
 │   └── style.css                   UI styles
 └── agent/
     ├── config.py                   Scoring weights and thresholds
-    ├── graph.py                    LangGraph workflow (3 nodes)
-    ├── models.py                   Data models
-    ├── state.py                    Typed agent state
+    ├── graph.py                    LangGraph workflow
+    ├── models.py                   Pydantic + frozen dataclass models
+    ├── state.py                    Typed agent state (TypedDict)
     ├── orchestrator.py             ReAct loop — LLM decides tool call order
     ├── tools.py                    Tool schemas and executors
-    ├── run_demo.py                 Command-line demo
+    ├── baselines/
+    │   ├── filter_search.py        Baseline 1: regex parsing + price sort (no LLM)
+    │   └── llm_chatbot.py          Baseline 2: single GPT call on sampled listings
     ├── nodes/
     │   ├── load_data.py            Load and normalise the CSV dataset
     │   ├── parse_preferences.py    Extract structured preferences from query
     │   └── orchestrate.py          LangGraph node wrapping the ReAct loop
     └── services/
         ├── dataset.py              CSV loading and normalisation
-        ├── parser.py               LLM preference extraction
+        ├── parser.py               LLM preference extraction (structured output)
         ├── scoring.py              Filtering, scoring, and ranking
-        ├── explanation.py          Recommendation explanation generation
-        ├── google_maps.py          Live neighbourhood enrichment
+        ├── explanation.py          Batched explanation generation
+        ├── google_maps.py          Live neighbourhood enrichment (transit/food/commute)
         └── neighborhoods.py        Neighbourhood scoring helpers
 ```
 

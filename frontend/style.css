@@ -849,3 +849,47 @@ body {
 @media (max-width: 600px) {
   .comparison-title { font-size: 1.15rem; }
 }
+
+/* ─── Two-Phase: Upgrade Banner ─── */
+.upgrade-banner {
+  display: flex; align-items: center; gap: 1.1rem;
+  background: linear-gradient(135deg, rgba(52,211,153,.07) 0%, rgba(139,92,246,.08) 100%);
+  border: 1px solid rgba(52,211,153,.22);
+  border-radius: var(--radius); padding: 1.1rem 1.4rem;
+  margin-bottom: 1.75rem;
+  box-shadow: 0 0 40px rgba(52,211,153,.06), var(--shadow-card);
+  animation: upgrade-in .45s cubic-bezier(.4,0,.2,1);
+}
+@keyframes upgrade-in {
+  from { opacity: 0; transform: translateY(-10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.upgrade-icon { font-size: 1.6rem; flex-shrink: 0; }
+.upgrade-content { flex: 1; }
+.upgrade-content strong { display: block; font-size: .88rem; font-weight: 700; color: var(--text); margin-bottom: .2rem; }
+.upgrade-content p { margin: 0; font-size: .78rem; color: var(--text-muted); line-height: 1.55; }
+.upgrade-meta { display: flex; gap: .55rem; margin-top: .5rem; flex-wrap: wrap; }
+.upgrade-meta-tag {
+  font-size: .68rem; font-weight: 600; padding: .18rem .6rem; border-radius: 50px;
+  background: rgba(255,255,255,.04); border: 1px solid var(--border); color: var(--text-dim);
+}
+.btn-upgrade {
+  flex-shrink: 0; padding: .6rem 1.35rem;
+  background: linear-gradient(135deg, #34d399, var(--accent));
+  border: none; border-radius: 50px;
+  color: #fff; font-weight: 700; font-size: .82rem;
+  font-family: var(--font); cursor: pointer;
+  transition: all .25s; letter-spacing: .01em; white-space: nowrap;
+  box-shadow: 0 4px 18px rgba(52,211,153,.25);
+}
+.btn-upgrade:hover { transform: translateY(-2px); box-shadow: 0 8px 28px rgba(52,211,153,.35); }
+.btn-upgrade:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }
+.phase-badge {
+  display: inline-flex; align-items: center; gap: .3rem;
+  font-size: .65rem; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; padding: .2rem .6rem; border-radius: 50px;
+}
+.phase-badge-fast { background: rgba(251,191,36,.1); border: 1px solid rgba(251,191,36,.2); color: var(--amber); }
+.phase-badge-ai   { background: rgba(139,92,246,.1); border: 1px solid rgba(139,92,246,.2); color: var(--accent-light); }
+@media (max-width: 640px) { .upgrade-banner { flex-direction: column; align-items: flex-start; } }
+

@@ -19,7 +19,7 @@ from typing import Any
 from agent.state import AgentState
 from agent.tools import TERMINAL_TOOLS, TOOL_SCHEMAS, execute_tool
 
-_MAX_ITERATIONS = 12
+_MAX_ITERATIONS = 6
 
 
 def _system_prompt() -> str:

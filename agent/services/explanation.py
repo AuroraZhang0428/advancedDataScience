@@ -22,27 +22,41 @@ def _require_llm_rewrite() -> None:
         raise RuntimeError("OPENAI_API_KEY is required because non-LLM explanation fallback has been removed.")
 
 
-def _rewrite_with_llm(draft: str) -> str:
-    """Use an LLM to rewrite the deterministic draft."""
+def _rewrite_batch_with_llm(drafts: list[str]) -> list[str]:
+    """Rewrite multiple explanation drafts in a single LLM call."""
 
     _require_llm_rewrite()
-    
+
+    if not drafts:
+        return []
+
+    import json
+    numbered = "\n\n".join(f"[{i+1}] {d}" for i, d in enumerate(drafts))
     try:
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
         prompt = PromptTemplate.from_template(
             "You are an expert real estate and leasing agent.\n"
-            "Rewrite the following deterministic listing description into a polished, natural, "
+            "Rewrite each numbered listing description below into a polished, natural, "
             "and persuasive short paragraph.\n"
-            "CRITICAL: You MUST include the exact numerical listing price (e.g., $1,500) and explicit trade-offs.\n"
-            "Maintain all factual information, score breakdowns, and make it sound conversational.\n"
-            "Ensure you clearly emphasize whether the price matches the user's budget and qualitative preference (cheap/expensive).\n\n"
-            "Draft:\n{draft}\n\nPolished Version:"
+            "CRITICAL: Keep the exact numerical price (e.g., $1,500), include explicit trade-offs, "
+            "and maintain all factual information.\n"
+            "Return ONLY a valid JSON array of strings — one string per listing, in order. "
+            "No markdown, no preamble, no extra keys.\n\n"
+            "Listings:\n{drafts}\n\nJSON array:"
         )
         chain = prompt | llm
-        result = chain.invoke({"draft": draft})
-        return result.content.strip()
-    except Exception as e:
-        raise RuntimeError(f"OpenAI-backed explanation rewriting failed: {e}") from e
+        result = chain.invoke({"drafts": numbered})
+        raw = result.content.strip()
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        parsed = json.loads(raw)
+        if isinstance(parsed, list) and len(parsed) == len(drafts):
+            return [str(p).strip() for p in parsed]
+        return drafts  # fallback if shape is wrong
+    except Exception:
+        return drafts  # fallback to deterministic drafts
+
 
 
 def _describe_top_strengths(score_breakdown: dict[str, float]) -> list[str]:
@@ -237,10 +251,12 @@ def generate_final_output(
     relaxation_history: list[dict[str, Any]],
     top_k: int,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Build final recommendation payloads and explanations."""
+    """Build final recommendation payloads and explanations (batched LLM call)."""
 
     recommendations = scored_listings[:top_k]
-    explanations = [
+
+    # Build all deterministic drafts first (no LLM, instant)
+    drafts = [
         generate_listing_explanation(
             listing,
             hard_constraints=hard_constraints,
@@ -249,4 +265,11 @@ def generate_final_output(
         )
         for listing in recommendations
     ]
+
+    # Rewrite all drafts in ONE batched LLM call instead of N individual calls
+    if os.environ.get("OPENAI_API_KEY") and drafts:
+        explanations = _rewrite_batch_with_llm(drafts)
+    else:
+        explanations = drafts
+
     return recommendations, explanations

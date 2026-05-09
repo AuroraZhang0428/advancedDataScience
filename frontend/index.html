@@ -18,34 +18,11 @@
         <span class="logo-icon">⌂</span>
         <span class="logo-text">Nest<span class="logo-accent">AI</span></span>
       </div>
-      <nav class="nav">
-        <button class="nav-btn" id="settingsToggle" title="Settings">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"></path>
-          </svg>
-          Settings
-        </button>
-      </nav>
+      <nav class="nav"></nav>
     </div>
   </header>
 
-  <!-- Settings Panel -->
-  <div class="settings-overlay" id="settingsOverlay"></div>
-  <aside class="settings-panel" id="settingsPanel">
-    <div class="settings-header">
-      <h3>Agent Settings</h3>
-      <button class="close-btn" id="settingsClose">✕</button>
-    </div>
-    <div class="settings-body">
-      <label class="field-label">Dataset CSV Path</label>
-      <input type="text" id="datasetInput" class="text-input" placeholder="matched_subset_dataset.csv" value="matched_subset_dataset.csv" />
-      <p class="hint">Path to the cleaned rental dataset CSV file (relative to project root).</p>
-    </div>
-    <div class="settings-footer">
-      <button class="btn-primary" id="saveSettings">Save Settings</button>
-    </div>
-  </aside>
+
 
   <!-- Hero -->
   <section class="hero">
@@ -139,6 +116,21 @@
           <strong>Agent needs clarification</strong>
           <span id="questionText"></span>
         </div>
+      </div>
+
+      <!-- ── Phase 1 → Phase 2 Upgrade Banner ── -->
+      <div class="upgrade-banner" id="upgradeBanner" style="display:none">
+        <div class="upgrade-icon">🤖</div>
+        <div class="upgrade-content">
+          <strong>Want smarter recommendations?</strong>
+          <p>These are fast filter-based matches. NestAI's AI agent can semantically score, rank, and explain each listing — usually takes ~15s.</p>
+          <div class="upgrade-meta">
+            <span class="upgrade-meta-tag">⚡ Filter results: instant</span>
+            <span class="upgrade-meta-tag">🧠 AI agent: ~15s</span>
+            <span class="upgrade-meta-tag">📊 Compare all 3 methods after</span>
+          </div>
+        </div>
+        <button class="btn-upgrade" id="upgradeBtn">✨ Optimize with NestAI</button>
       </div>
 
       <!-- Query Summary -->

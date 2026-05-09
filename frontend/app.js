@@ -32,26 +32,11 @@
   const errorMessage = $("errorMessage");
   const modalOverlay = $("modalOverlay");
   const modalContent = $("modalContent");
-  const settingsPanel = $("settingsPanel");
-  const settingsOverlay = $("settingsOverlay");
   const compareBtn = $("compareBtn");
   const comparisonSection = $("comparisonSection");
+  const upgradeBanner = $("upgradeBanner");
+  const upgradeBtn = $("upgradeBtn");
 
-  /* ── Settings ── */
-  $("settingsToggle").addEventListener("click", () => {
-    settingsPanel.classList.add("open");
-    settingsOverlay.classList.add("open");
-  });
-  function closeSettings() {
-    settingsPanel.classList.remove("open");
-    settingsOverlay.classList.remove("open");
-  }
-  $("settingsClose").addEventListener("click", closeSettings);
-  settingsOverlay.addEventListener("click", closeSettings);
-  $("saveSettings").addEventListener("click", () => {
-    savedDataset = $("datasetInput").value.trim() || "matched_subset_dataset.csv";
-    closeSettings();
-  });
 
   /* ── Chips ── */
   document.querySelectorAll(".chip").forEach((chip) => {
@@ -66,14 +51,42 @@
   queryInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSearch(); }
   });
+  upgradeBtn.addEventListener("click", optimizeWithAI);
 
+  // ── Phase 1: fast filter-based search (instant) ──────────────────────────
   async function doSearch() {
     const query = queryInput.value.trim();
     if (!query) return;
     lastBaseQuery = query;
 
-    setLoading(true);
+    setLoading(true, "Filtering listings…");
     resultsSection.style.display = "none";
+    hideToast();
+
+    try {
+      const res = await fetch(API + "/api/search/baseline-filter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, dataset: savedDataset }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Search failed");
+      renderPhase1Results(query, data);
+    } catch (err) {
+      showToast(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // ── Phase 2: full NestAI agent (AI-powered, on demand) ───────────────────
+  async function optimizeWithAI() {
+    const query = lastBaseQuery || queryInput.value.trim();
+    if (!query) return;
+
+    upgradeBtn.disabled = true;
+    upgradeBtn.textContent = "⏳ Running AI agent…";
+    setLoading(true, "AI is scoring & ranking…");
     hideToast();
 
     try {
@@ -83,16 +96,57 @@
         body: JSON.stringify({ query, dataset: savedDataset }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Search failed");
+      if (!res.ok) throw new Error(data.error || "AI search failed");
       lastAgentResult = data;
+      upgradeBanner.style.display = "none";
       renderResults(query, data);
       if (compareBtn) compareBtn.style.display = data.recommendations && data.recommendations.length ? "inline-flex" : "none";
       if (comparisonSection) comparisonSection.style.display = "none";
     } catch (err) {
       showToast(err.message);
+      upgradeBtn.disabled = false;
+      upgradeBtn.textContent = "✨ Optimize with NestAI";
     } finally {
       setLoading(false);
     }
+  }
+
+  // ── Render Phase 1 (filter baseline) results ─────────────────────────────
+  function renderPhase1Results(query, data) {
+    const recs = data.recommendations || [];
+
+    // Status bar
+    statusTitle.innerHTML = `Found ${recs.length} quick match${recs.length !== 1 ? "es" : ""} &nbsp;<span class="phase-badge phase-badge-fast">⚡ Filter</span>`;
+    statusSubtitle.textContent = recs.length
+      ? `Sorted by price · ${data.total_matched || recs.length} total matched`
+      : "No listings matched your filters — try broadening your search.";
+    statusIcon.textContent = recs.length ? "⚡" : "—";
+    statusIcon.style.background = "var(--amber-dim)";
+    statusIcon.style.color = "var(--amber)";
+
+    relaxBanner.style.display = "none";
+    questionBanner.style.display = "none";
+    querySummaryText.textContent = query;
+
+    // Hide AI panels (not available in phase 1)
+    if (preferencesPanel) preferencesPanel.style.display = "none";
+    if (agentTracePanel) agentTracePanel.style.display = "none";
+
+    // Render cards (reuse same card renderer, score=0 → no ring)
+    cardsGrid.innerHTML = "";
+    recs.forEach((rec, idx) => cardsGrid.appendChild(createCard(rec, idx, "")));
+
+    // Hide compare btn until agent runs
+    if (compareBtn) compareBtn.style.display = "none";
+    if (comparisonSection) comparisonSection.style.display = "none";
+
+    // Show upgrade banner
+    upgradeBtn.disabled = false;
+    upgradeBtn.textContent = "✨ Optimize with NestAI";
+    upgradeBanner.style.display = "flex";
+
+    resultsSection.style.display = "block";
+    resultsSection.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   /* ── Clarification flow ── */
@@ -275,11 +329,14 @@
   }
 
   /* ── Loading ── */
-  function setLoading(on) {
+  function setLoading(on, label) {
     loadingOverlay.style.display = on ? "flex" : "none";
     searchBtn.disabled = on;
     btnText.classList.toggle("hidden", on);
     btnSpinner.classList.toggle("hidden", !on);
+    const titleEl = loadingOverlay.querySelector(".loading-title");
+    if (titleEl && label) titleEl.textContent = label;
+    else if (titleEl) titleEl.textContent = "Finding your perfect home\u2026";
     if (on) animateSteps();
   }
 
@@ -617,6 +674,8 @@
     resultsSection.style.display = "none";
     if (preferencesPanel) preferencesPanel.style.display = "none";
     if (agentTracePanel) agentTracePanel.style.display = "none";
+    upgradeBanner.style.display = "none";
+    lastAgentResult = null;
     window.scrollTo({ top: 0, behavior: "smooth" });
     queryInput.focus();
   });
