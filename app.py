@@ -30,9 +30,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 # Build the graph once at startup
 _graph = None
 
-# ── Dataset cache: loaded once per dataset path ───────────────────────────────
-_listings_cache: dict[str, list] = {}
-
 # ── In-memory session store: {session_id: {state, created_at}} ───────────────
 _sessions: dict[str, dict] = {}
 _SESSION_TTL_MINUTES = 30
@@ -43,13 +40,6 @@ def get_graph():
     if _graph is None:
         _graph = build_graph()
     return _graph
-
-
-def get_listings(dataset_path: str) -> list:
-    """Return cached listings for a dataset path, loading once on first access."""
-    if dataset_path not in _listings_cache:
-        _listings_cache[dataset_path] = load_listings(dataset_path)
-    return _listings_cache[dataset_path]
 
 
 def _purge_old_sessions() -> None:
@@ -380,7 +370,7 @@ def search_baseline_filter():
         return jsonify({"error": f"Dataset not found: {dataset_path}"}), 400
 
     try:
-        listings = get_listings(str(dataset_path))
+        listings = load_listings(str(dataset_path))
         result = run_filter_baseline(listings, query)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -410,7 +400,7 @@ def search_baseline_llm():
         return jsonify({"error": "OPENAI_API_KEY is required for the LLM chatbot baseline."}), 400
 
     try:
-        listings = get_listings(str(dataset_path))
+        listings = load_listings(str(dataset_path))
         result = run_llm_chatbot_baseline(listings, query, resolved_key)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500

@@ -1,242 +1,11 @@
 /**
- * compare.js — NestAI Comparison Mode (v2)
- * Dark theme, fixed search input, proper panel toggle.
+ * compare.js — NestAI "How It Works" info panel
+ * Floating button opens a static explanation page comparing the 3 methods.
+ * No search inputs, no API calls — informational only.
  */
 
 (function () {
   "use strict";
-
-  const ENDPOINTS = {
-    filter: "/api/search/baseline-filter",
-    llm:    "/api/search/baseline-llm",
-    agent:  "/api/search",
-  };
-
-  const COLUMNS = [
-    {
-      key:   "filter",
-      label: "Baseline 1 · Filter",
-      badge: "No LLM",
-      color: "#e07b39",
-      desc:  "Regex/keyword parsing → hard filters → price sort. Fast & deterministic.",
-    },
-    {
-      key:   "llm",
-      label: "Baseline 2 · LLM Chat",
-      badge: "Single GPT call",
-      color: "#7c6bdf",
-      desc:  "Query + sampled listings sent as plain text to GPT-4o-mini in one turn.",
-    },
-    {
-      key:   "agent",
-      label: "NestAI Agent",
-      badge: "ReAct pipeline",
-      color: "#2a9d8f",
-      desc:  "LangGraph ReAct loop: parse → filter → score → adapt → explain.",
-    },
-  ];
-
-  const state = {
-    results: { filter: null, llm: null, agent: null },
-    loading: { filter: false, llm: false, agent: false },
-    errors:  { filter: null, llm: null, agent: null },
-    timings: { filter: null, llm: null, agent: null },
-  };
-
-  // ── Helpers ───────────────────────────────────────────────────────────────
-
-  function el(tag, attrs, ...children) {
-    const node = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs || {})) {
-      if (k === "className") node.className = v;
-      else if (k === "style") Object.assign(node.style, v);
-      else if (k.startsWith("on")) node.addEventListener(k.slice(2).toLowerCase(), v);
-      else node.setAttribute(k, v);
-    }
-    for (const c of children) {
-      if (c == null) continue;
-      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
-    }
-    return node;
-  }
-
-  function getApiKey() {
-    const stored = localStorage.getItem("nestai_api_key") || "";
-    if (stored) return stored;
-    const inp = document.querySelector('input[type="password"]');
-    return inp ? inp.value.trim() : "";
-  }
-
-  // ── API ───────────────────────────────────────────────────────────────────
-
-  async function fetchMethod(method, query, apiKey) {
-    const body = { query, dataset: "matched_subset_dataset.csv" };
-    if (method === "llm" || method === "agent") body.api_key = apiKey;
-    const t0 = performance.now();
-    const res = await fetch(ENDPOINTS[method], {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ error: res.statusText }));
-      throw Object.assign(new Error(err.error || "Request failed"), { elapsed });
-    }
-    return { data: await res.json(), elapsed };
-  }
-
-  // ── Card rendering ────────────────────────────────────────────────────────
-
-  function renderCard(listing, meta, rank, agentExplanation) {
-    const price  = listing.price != null ? `$${Number(listing.price).toFixed(0)}/night` : "N/A";
-    const rating = listing.review_rating != null ? `${Number(listing.review_rating).toFixed(2)}★` : "—";
-    const beds   = listing.bedrooms != null ? `${listing.bedrooms}BR` : "?BR";
-    const baths  = listing.bathrooms != null ? `${Number(listing.bathrooms).toFixed(1)}BA` : "?BA";
-    const nbhd   = listing.neighborhood || "—";
-    const ams    = (listing.amenities || []).slice(0, 4);
-    const expl   = listing.llm_explanation || agentExplanation || null;
-
-    return el("div", { className: "cmp-card" },
-      el("div", { className: "cmp-card-rank", style: { background: meta.color } }, `#${rank}`),
-      el("div", { className: "cmp-card-body" },
-        el("div", { className: "cmp-card-title" }, listing.title || "Untitled"),
-        el("div", { className: "cmp-card-meta" },
-          el("span", { className: "cmp-tag" }, nbhd),
-          el("span", { className: "cmp-tag cmp-tag--price" }, price),
-          el("span", { className: "cmp-tag" }, `${beds} · ${baths}`),
-          el("span", { className: "cmp-tag" }, rating),
-        ),
-        ams.length ? el("div", { className: "cmp-amenities" },
-          ...ams.map(a => el("span", { className: "cmp-amenity" }, a))
-        ) : null,
-        expl ? el("div", { className: "cmp-expl" }, `"${expl}"`) : null,
-      )
-    );
-  }
-
-  function renderColumn(meta) {
-    const col = document.getElementById(`cmp-col-${meta.key}`);
-    if (!col) return;
-    const header = col.querySelector(".cmp-col-header");
-    col.innerHTML = "";
-    col.appendChild(header);
-
-    if (state.loading[meta.key]) {
-      col.appendChild(el("div", { className: "cmp-spinner-wrap" },
-        el("div", { className: "cmp-spinner" }),
-        el("p", { className: "cmp-spinner-label" }, "Searching…"),
-      ));
-      return;
-    }
-    if (state.errors[meta.key]) {
-      col.appendChild(el("div", { className: "cmp-error" }, `⚠ ${state.errors[meta.key]}`));
-      return;
-    }
-    const result = state.results[meta.key];
-    if (!result) return;
-
-    const recs    = result.recommendations || [];
-    const expls   = result.explanations || [];
-    const elapsed = state.timings[meta.key];
-
-    const stats = [
-      `${recs.length} results`,
-      elapsed ? `${elapsed}s` : null,
-      result.total_matched != null ? `${result.total_matched} matched` : null,
-      result.listings_shown != null ? `${result.listings_shown} shown to LLM` : null,
-    ].filter(Boolean);
-
-    col.appendChild(el("div", { className: "cmp-stats" },
-      ...stats.map(s => el("span", { className: "cmp-stat" }, s))
-    ));
-    if (result.explanation) {
-      col.appendChild(el("div", { className: "cmp-method-expl" }, result.explanation));
-    }
-    if (recs.length === 0) {
-      col.appendChild(el("div", { className: "cmp-empty" }, "No results returned."));
-      return;
-    }
-    const list = el("div", { className: "cmp-cards" });
-    recs.forEach((r, i) => list.appendChild(renderCard(r, meta, i + 1, expls[i])));
-    col.appendChild(list);
-  }
-
-  // ── Search ────────────────────────────────────────────────────────────────
-
-  async function runComparison(query) {
-    const apiKey = getApiKey();
-    for (const m of COLUMNS) {
-      state.results[m.key] = null;
-      state.errors[m.key]  = null;
-      state.timings[m.key] = null;
-      state.loading[m.key] = true;
-    }
-    COLUMNS.forEach(m => renderColumn(m));
-
-    await Promise.allSettled(COLUMNS.map(async (meta) => {
-      try {
-        const { data, elapsed } = await fetchMethod(meta.key, query, apiKey);
-        state.results[meta.key] = data;
-        state.timings[meta.key] = elapsed;
-      } catch (err) {
-        state.errors[meta.key]  = err.message;
-        if (err.elapsed) state.timings[meta.key] = err.elapsed;
-      } finally {
-        state.loading[meta.key] = false;
-        renderColumn(meta);
-      }
-    }));
-  }
-
-  async function handleSearch() {
-    const query = document.getElementById("cmp-query").value.trim();
-    if (!query) { alert("Please enter a search query."); return; }
-    const btn = document.getElementById("cmp-search-btn");
-    btn.disabled = true;
-    btn.textContent = "Searching…";
-    try { await runComparison(query); }
-    finally { btn.disabled = false; btn.textContent = "Compare All"; }
-  }
-
-  // ── Build panel ───────────────────────────────────────────────────────────
-
-  function buildPanel() {
-    return el("div", { id: "cmp-panel" },
-      el("div", { className: "cmp-panel-header" },
-        el("div", { className: "cmp-panel-title" },
-          el("span", {}, "🔍"),
-          el("h2", {}, "Side-by-Side Comparison"),
-        ),
-        el("p", { className: "cmp-panel-sub" },
-          "Run the same query through all three search methods at once."
-        ),
-      ),
-      el("div", { className: "cmp-search-row" },
-        el("input", {
-          id: "cmp-query",
-          type: "text",
-          placeholder: "e.g. 2BR with WiFi in Brooklyn under $200/night",
-          onKeydown: e => { if (e.key === "Enter") handleSearch(); },
-        }),
-        el("button", { id: "cmp-search-btn", onClick: handleSearch }, "Compare All"),
-      ),
-      el("div", { id: "cmp-columns" },
-        ...COLUMNS.map(meta =>
-          el("div", { className: "cmp-col", id: `cmp-col-${meta.key}` },
-            el("div", {
-              className: "cmp-col-header",
-              style: { borderBottomColor: meta.color },
-            },
-              el("span", { className: "cmp-badge", style: { background: meta.color } }, meta.badge),
-              el("h3", {}, meta.label),
-              el("p", { className: "cmp-col-desc" }, meta.desc),
-            )
-          )
-        )
-      )
-    );
-  }
 
   // ── Styles ────────────────────────────────────────────────────────────────
 
@@ -245,133 +14,310 @@
     const s = document.createElement("style");
     s.id = "cmp-styles";
     s.textContent = `
+      /* ── Toggle button ── */
       #cmp-toggle-btn {
-        position: fixed; top: 16px; right: 180px; z-index: 1000;
-        padding: 9px 20px;
-        background: linear-gradient(135deg, #2a9d8f, #264653);
+        position: fixed; top: 16px; right: 24px; z-index: 1000;
+        display: flex; align-items: center; gap: 7px;
+        padding: 9px 18px;
+        background: linear-gradient(135deg, #2a9d8f 0%, #1a6b62 100%);
         color: #fff; border: none; border-radius: 22px;
-        font-size: 14px; font-weight: 700; cursor: pointer;
-        letter-spacing: .3px;
-        box-shadow: 0 4px 16px rgba(42,157,143,.35);
-        transition: opacity .2s, transform .2s;
+        font-size: 13px; font-weight: 700; font-family: inherit;
+        cursor: pointer; letter-spacing: .3px;
+        box-shadow: 0 4px 18px rgba(42,157,143,.35);
+        transition: opacity .2s, transform .2s, box-shadow .2s;
       }
-      #cmp-toggle-btn:hover { opacity: .88; transform: translateY(-1px); }
+      #cmp-toggle-btn:hover {
+        opacity: .92; transform: translateY(-2px);
+        box-shadow: 0 8px 28px rgba(42,157,143,.45);
+      }
+      #cmp-toggle-btn .cmp-btn-dot {
+        width: 7px; height: 7px; border-radius: 50%;
+        background: rgba(255,255,255,.55);
+        animation: cmp-pulse 2s ease-in-out infinite;
+      }
+      @keyframes cmp-pulse {
+        0%, 100% { opacity: .55; transform: scale(1); }
+        50%       { opacity: 1;   transform: scale(1.3); }
+      }
 
+      /* ── Full-screen panel ── */
       #cmp-panel {
         display: none; position: fixed; inset: 0; z-index: 999;
-        background: #0d1117; overflow-y: auto;
-        padding: 72px 24px 48px; box-sizing: border-box;
-        color: #e6edf3; font-family: inherit;
+        background: #07080d; overflow-y: auto;
+        font-family: inherit;
       }
-      #cmp-panel.visible { display: block; }
+      #cmp-panel.visible { display: block; animation: cmp-fade-in .3s ease; }
+      @keyframes cmp-fade-in { from { opacity: 0; } to { opacity: 1; } }
 
-      .cmp-panel-header { text-align: center; margin-bottom: 24px; }
-      .cmp-panel-title {
-        display: flex; align-items: center; justify-content: center;
-        gap: 10px; margin-bottom: 6px;
-      }
-      .cmp-panel-title h2 { margin: 0; font-size: 26px; font-weight: 700; color: #e6edf3; }
-      .cmp-panel-sub { color: #8b949e; font-size: 14px; margin: 0; }
-
-      .cmp-search-row {
-        display: flex; gap: 10px; align-items: center;
-        background: #161b22; border: 1px solid #30363d; border-radius: 12px;
-        padding: 12px 16px; max-width: 860px; margin: 0 auto 28px;
-      }
-      #cmp-query {
-        flex: 1; border: none; outline: none;
-        font-size: 15px; color: #e6edf3; background: transparent;
-      }
-      #cmp-query::placeholder { color: #484f58; }
-      #cmp-search-btn {
-        padding: 9px 24px;
-        background: linear-gradient(135deg, #2a9d8f, #264653);
-        color: #fff; border: none; border-radius: 8px;
-        font-size: 14px; font-weight: 700; cursor: pointer;
-        white-space: nowrap; transition: opacity .2s;
-      }
-      #cmp-search-btn:hover { opacity: .85; }
-      #cmp-search-btn:disabled { opacity: .5; cursor: default; }
-
-      #cmp-columns {
-        display: grid; grid-template-columns: repeat(3, 1fr);
-        gap: 16px; max-width: 1300px; margin: 0 auto; align-items: start;
-      }
-      @media (max-width: 900px) { #cmp-columns { grid-template-columns: 1fr; } }
-
-      .cmp-col {
-        background: #161b22; border: 1px solid #30363d;
-        border-radius: 14px; overflow: hidden; min-height: 120px;
-      }
-      .cmp-col-header { padding: 14px 16px 12px; border-bottom: 3px solid #30363d; }
-      .cmp-badge {
-        display: inline-block; padding: 2px 9px; border-radius: 10px;
-        font-size: 11px; font-weight: 700; color: #fff; margin-bottom: 6px;
-      }
-      .cmp-col-header h3 { margin: 0 0 4px; font-size: 15px; font-weight: 700; color: #e6edf3; }
-      .cmp-col-desc { font-size: 12px; color: #8b949e; margin: 0; line-height: 1.4; }
-
-      .cmp-stats {
-        display: flex; flex-wrap: wrap; gap: 6px;
-        padding: 8px 14px; background: #0d1117; border-bottom: 1px solid #21262d;
-      }
-      .cmp-stat {
-        font-size: 11px; color: #8b949e; background: #21262d;
-        padding: 2px 8px; border-radius: 10px;
-      }
-      .cmp-method-expl {
-        padding: 8px 14px; font-size: 11px; color: #8b949e;
-        font-style: italic; line-height: 1.5; border-bottom: 1px solid #21262d;
-      }
-
-      .cmp-cards { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-      .cmp-card {
-        display: flex; background: #0d1117; border: 1px solid #21262d;
-        border-radius: 10px; overflow: hidden; transition: border-color .15s;
-      }
-      .cmp-card:hover { border-color: #388bfd; }
-      .cmp-card-rank {
-        width: 30px; min-width: 30px;
-        display: flex; align-items: center; justify-content: center;
-        color: #fff; font-size: 11px; font-weight: 700;
-      }
-      .cmp-card-body { padding: 10px 12px; flex: 1; min-width: 0; }
-      .cmp-card-title {
-        font-size: 13px; font-weight: 600; color: #e6edf3; margin-bottom: 5px;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      }
-      .cmp-card-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
-      .cmp-tag {
-        font-size: 11px; background: #21262d; color: #8b949e;
-        padding: 2px 7px; border-radius: 8px; white-space: nowrap;
-      }
-      .cmp-tag--price { background: #1a3a2a; color: #3fb950; font-weight: 600; }
-      .cmp-amenities { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 4px; }
-      .cmp-amenity {
-        font-size: 10px; background: #1a2332; color: #79c0ff;
-        padding: 1px 6px; border-radius: 6px;
-      }
-      .cmp-expl { font-size: 11px; color: #8b949e; font-style: italic; margin-top: 4px; line-height: 1.4; }
-
-      .cmp-spinner-wrap { display: flex; flex-direction: column; align-items: center; padding: 40px 20px; gap: 12px; }
-      .cmp-spinner {
-        width: 28px; height: 28px;
-        border: 3px solid #21262d; border-top-color: #2a9d8f;
-        border-radius: 50%; animation: cmp-spin .8s linear infinite;
-      }
-      @keyframes cmp-spin { to { transform: rotate(360deg); } }
-      .cmp-spinner-label { font-size: 13px; color: #8b949e; }
-      .cmp-error { padding: 20px; color: #f85149; font-size: 13px; }
-      .cmp-empty { padding: 20px; color: #484f58; font-size: 13px; text-align: center; }
-
+      /* ── Close button ── */
       #cmp-close {
-        display: none; position: fixed; top: 18px; left: 20px; z-index: 1001;
-        background: #21262d; border: 1px solid #30363d; color: #e6edf3;
-        border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+        position: fixed; top: 18px; left: 20px; z-index: 1001;
+        display: none; align-items: center; gap: 6px;
+        background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1);
+        color: #e6edf3; border-radius: 10px;
+        padding: 8px 16px; font-size: 13px; font-weight: 600;
+        font-family: inherit; cursor: pointer; transition: background .2s;
       }
-      #cmp-close:hover { background: #30363d; }
+      #cmp-close:hover { background: rgba(255,255,255,.12); }
+
+      /* ── Panel inner layout ── */
+      .cmp-inner {
+        max-width: 1200px; margin: 0 auto;
+        padding: 80px 32px 72px;
+      }
+
+      /* ── Hero section ── */
+      .cmp-hero {
+        text-align: center; margin-bottom: 64px;
+      }
+      .cmp-hero-badge {
+        display: inline-flex; align-items: center; gap: 7px;
+        background: rgba(42,157,143,.12); border: 1px solid rgba(42,157,143,.25);
+        border-radius: 50px; padding: 5px 14px; margin-bottom: 22px;
+        font-size: 12px; font-weight: 700; color: #2a9d8f; letter-spacing: .06em; text-transform: uppercase;
+      }
+      .cmp-hero h1 {
+        font-size: clamp(28px, 4vw, 44px); font-weight: 800;
+        color: #e6edf3; margin: 0 0 16px; letter-spacing: -.02em; line-height: 1.15;
+      }
+      .cmp-hero h1 span { color: #2a9d8f; }
+      .cmp-hero p {
+        font-size: 17px; color: #8b949e; max-width: 580px;
+        margin: 0 auto; line-height: 1.7;
+      }
+
+      /* ── Section title ── */
+      .cmp-section-title {
+        text-align: center; margin-bottom: 36px;
+      }
+      .cmp-section-title h2 {
+        font-size: 22px; font-weight: 700; color: #e6edf3; margin: 0 0 8px;
+      }
+      .cmp-section-title p { font-size: 14px; color: #8b949e; margin: 0; }
+
+      /* ── Method cards grid ── */
+      .cmp-methods {
+        display: grid; grid-template-columns: repeat(3, 1fr);
+        gap: 20px; margin-bottom: 64px;
+      }
+      @media (max-width: 860px) { .cmp-methods { grid-template-columns: 1fr; } }
+
+      .cmp-method-card {
+        background: #0d1117; border: 1px solid #21262d;
+        border-radius: 16px; padding: 28px 24px;
+        position: relative; overflow: hidden;
+        transition: border-color .25s, transform .25s;
+      }
+      .cmp-method-card:hover { border-color: #30363d; transform: translateY(-3px); }
+      .cmp-method-card.cmp-card-winner {
+        border-color: rgba(42,157,143,.35);
+        background: linear-gradient(160deg, rgba(42,157,143,.06) 0%, #0d1117 60%);
+      }
+      .cmp-method-card.cmp-card-winner::before {
+        content: ''; position: absolute; inset: 0;
+        background: radial-gradient(ellipse 80% 50% at 50% 0%, rgba(42,157,143,.12), transparent);
+        pointer-events: none;
+      }
+
+      .cmp-winner-chip {
+        display: inline-flex; align-items: center; gap: 5px;
+        background: rgba(42,157,143,.15); border: 1px solid rgba(42,157,143,.3);
+        border-radius: 50px; padding: 3px 11px; margin-bottom: 18px;
+        font-size: 11px; font-weight: 700; color: #2a9d8f; text-transform: uppercase; letter-spacing: .05em;
+      }
+
+      .cmp-method-icon {
+        width: 44px; height: 44px; border-radius: 12px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 22px; margin-bottom: 16px;
+      }
+      .cmp-method-card h3 {
+        font-size: 16px; font-weight: 700; color: #e6edf3; margin: 0 0 6px;
+      }
+      .cmp-method-card .cmp-method-tag {
+        display: inline-block; font-size: 11px; font-weight: 700;
+        padding: 2px 9px; border-radius: 8px; margin-bottom: 14px;
+      }
+      .cmp-method-card p {
+        font-size: 13.5px; color: #8b949e; line-height: 1.65; margin: 0 0 20px;
+      }
+
+      .cmp-pros-cons { display: flex; flex-direction: column; gap: 6px; }
+      .cmp-trait {
+        display: flex; align-items: flex-start; gap: 8px;
+        font-size: 12.5px; line-height: 1.5;
+      }
+      .cmp-trait-icon { flex-shrink: 0; font-size: 13px; margin-top: 1px; }
+      .cmp-trait-text { color: #8b949e; }
+      .cmp-trait.good .cmp-trait-text { color: #c9d1d9; }
+
+      /* ── Comparison table ── */
+      .cmp-table-wrap {
+        background: #0d1117; border: 1px solid #21262d; border-radius: 16px;
+        overflow: hidden; margin-bottom: 64px;
+      }
+      .cmp-table {
+        width: 100%; border-collapse: collapse;
+      }
+      .cmp-table th {
+        padding: 14px 20px; font-size: 12px; font-weight: 700;
+        text-transform: uppercase; letter-spacing: .06em;
+        border-bottom: 1px solid #21262d; text-align: left;
+      }
+      .cmp-table th:first-child { color: #484f58; }
+      .cmp-table th.th-filter { color: #e07b39; }
+      .cmp-table th.th-llm    { color: #7c6bdf; }
+      .cmp-table th.th-agent  { color: #2a9d8f; }
+      .cmp-table td {
+        padding: 13px 20px; font-size: 13px; color: #8b949e;
+        border-bottom: 1px solid #161b22;
+      }
+      .cmp-table td:first-child { color: #c9d1d9; font-weight: 600; }
+      .cmp-table tr:last-child td { border-bottom: none; }
+      .cmp-table tr:hover td { background: rgba(255,255,255,.02); }
+      .cmp-check { color: #3fb950; font-size: 15px; }
+      .cmp-cross  { color: #f85149; font-size: 15px; }
+      .cmp-partial { color: #d29922; font-size: 13px; font-weight: 600; }
+
+      /* ── How to use section ── */
+      .cmp-howto {
+        background: linear-gradient(135deg, rgba(42,157,143,.07) 0%, rgba(124,107,223,.07) 100%);
+        border: 1px solid rgba(42,157,143,.18);
+        border-radius: 16px; padding: 36px 40px; margin-bottom: 0;
+        text-align: center;
+      }
+      .cmp-howto h2 { font-size: 20px; font-weight: 700; color: #e6edf3; margin: 0 0 12px; }
+      .cmp-howto p  { font-size: 14px; color: #8b949e; margin: 0 0 28px; line-height: 1.7; }
+      .cmp-steps {
+        display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;
+      }
+      .cmp-step {
+        display: flex; align-items: center; gap: 10px;
+        background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);
+        border-radius: 12px; padding: 12px 18px;
+        font-size: 13px; color: #c9d1d9; font-weight: 500;
+      }
+      .cmp-step-num {
+        width: 24px; height: 24px; border-radius: 50%;
+        background: rgba(42,157,143,.2); border: 1px solid rgba(42,157,143,.4);
+        color: #2a9d8f; font-size: 12px; font-weight: 800;
+        display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+      }
     `;
     document.head.appendChild(s);
+  }
+
+  // ── Build panel ───────────────────────────────────────────────────────────
+
+  function buildPanel() {
+    const panel = document.createElement("div");
+    panel.id = "cmp-panel";
+    panel.innerHTML = `
+      <div class="cmp-inner">
+
+        <!-- Hero -->
+        <div class="cmp-hero">
+          <div class="cmp-hero-badge">⚡ Method Comparison</div>
+          <h1>Why <span>NestAI</span> finds better apartments</h1>
+          <p>Most tools either blindly filter by price or dump listings into a chatbot. NestAI uses a multi-step AI agent that reasons, adapts, and explains — just like a real leasing consultant.</p>
+        </div>
+
+        <!-- Method Cards -->
+        <div class="cmp-section-title">
+          <h2>The Three Approaches</h2>
+          <p>Same query. Three very different strategies.</p>
+        </div>
+
+        <div class="cmp-methods">
+
+          <!-- Baseline 1 -->
+          <div class="cmp-method-card">
+            <div class="cmp-method-icon" style="background:rgba(224,123,57,.1)">🔍</div>
+            <h3>Filter-Based Search</h3>
+            <span class="cmp-method-tag" style="background:rgba(224,123,57,.12);color:#e07b39">Baseline 1 · No AI</span>
+            <p>Parses your query with regex patterns and hard filters, then sorts results by price. What you'd get from a basic property portal.</p>
+            <div class="cmp-pros-cons">
+              <div class="cmp-trait good"><span class="cmp-trait-icon">✓</span><span class="cmp-trait-text">Instant results, fully deterministic</span></div>
+              <div class="cmp-trait"><span class="cmp-trait-icon">✗</span><span class="cmp-trait-text">No semantic understanding of nuance</span></div>
+              <div class="cmp-trait"><span class="cmp-trait-icon">✗</span><span class="cmp-trait-text">Fails on vague requests ("quiet, remote-work friendly")</span></div>
+              <div class="cmp-trait"><span class="cmp-trait-icon">✗</span><span class="cmp-trait-text">Returns nothing when filters are too strict</span></div>
+              <div class="cmp-trait"><span class="cmp-trait-icon">✗</span><span class="cmp-trait-text">No ranking beyond price — no explanations</span></div>
+            </div>
+          </div>
+
+          <!-- Baseline 2 -->
+          <div class="cmp-method-card">
+            <div class="cmp-method-icon" style="background:rgba(124,107,223,.1)">💬</div>
+            <h3>Standard LLM Chatbot</h3>
+            <span class="cmp-method-tag" style="background:rgba(124,107,223,.12);color:#7c6bdf">Baseline 2 · Single GPT Call</span>
+            <p>Samples up to 60 listings and sends them as plain text to GPT-4o-mini in one shot. Simulates pasting your query into ChatGPT.</p>
+            <div class="cmp-pros-cons">
+              <div class="cmp-trait good"><span class="cmp-trait-icon">✓</span><span class="cmp-trait-text">Understands natural language queries</span></div>
+              <div class="cmp-trait good"><span class="cmp-trait-icon">✓</span><span class="cmp-trait-text">Can reason about trade-offs in context</span></div>
+              <div class="cmp-trait"><span class="cmp-trait-icon">✗</span><span class="cmp-trait-text">Only sees a random sample of 60 listings</span></div>
+              <div class="cmp-trait"><span class="cmp-trait-icon">✗</span><span class="cmp-trait-text">No constraint enforcement or scoring pipeline</span></div>
+              <div class="cmp-trait"><span class="cmp-trait-icon">✗</span><span class="cmp-trait-text">Cannot adapt when initial results are weak</span></div>
+            </div>
+          </div>
+
+          <!-- NestAI -->
+          <div class="cmp-method-card cmp-card-winner">
+            <div class="cmp-winner-chip">⭐ Our System</div>
+            <div class="cmp-method-icon" style="background:rgba(42,157,143,.12)">🏠</div>
+            <h3>NestAI Agent</h3>
+            <span class="cmp-method-tag" style="background:rgba(42,157,143,.12);color:#2a9d8f">LangGraph ReAct Pipeline</span>
+            <p>A LangGraph ReAct agent that parses structured preferences, applies hard constraints, scores with a multi-dimensional formula, and adapts when results fall short.</p>
+            <div class="cmp-pros-cons">
+              <div class="cmp-trait good"><span class="cmp-trait-icon">✓</span><span class="cmp-trait-text">Searches the entire dataset — no sampling limit</span></div>
+              <div class="cmp-trait good"><span class="cmp-trait-icon">✓</span><span class="cmp-trait-text">Multi-dimensional scoring: price, reviews, location, amenities, lifestyle</span></div>
+              <div class="cmp-trait good"><span class="cmp-trait-icon">✓</span><span class="cmp-trait-text">Autonomously relaxes constraints when needed</span></div>
+              <div class="cmp-trait good"><span class="cmp-trait-icon">✓</span><span class="cmp-trait-text">Enriches shortlist with live Google Maps data</span></div>
+              <div class="cmp-trait good"><span class="cmp-trait-icon">✓</span><span class="cmp-trait-text">Explains every recommendation with factual reasoning</span></div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Comparison table -->
+        <div class="cmp-section-title">
+          <h2>Feature Comparison</h2>
+        </div>
+        <div class="cmp-table-wrap">
+          <table class="cmp-table">
+            <thead>
+              <tr>
+                <th>Capability</th>
+                <th class="th-filter">Filter Search</th>
+                <th class="th-llm">LLM Chatbot</th>
+                <th class="th-agent">NestAI Agent</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Natural language understanding</td><td><span class="cmp-cross">✗</span></td><td><span class="cmp-check">✓</span></td><td><span class="cmp-check">✓</span></td></tr>
+              <tr><td>Searches full dataset</td><td><span class="cmp-check">✓</span></td><td><span class="cmp-cross">✗ 60 listings only</span></td><td><span class="cmp-check">✓</span></td></tr>
+              <tr><td>Multi-dimensional scoring</td><td><span class="cmp-cross">✗ Price only</span></td><td><span class="cmp-partial">~ Implicit</span></td><td><span class="cmp-check">✓ 6 dimensions</span></td></tr>
+              <tr><td>Adapts when results are weak</td><td><span class="cmp-cross">✗</span></td><td><span class="cmp-cross">✗</span></td><td><span class="cmp-check">✓ Autonomous</span></td></tr>
+              <tr><td>Live location enrichment</td><td><span class="cmp-cross">✗</span></td><td><span class="cmp-cross">✗</span></td><td><span class="cmp-check">✓ Google Maps</span></td></tr>
+              <tr><td>Per-listing explanations</td><td><span class="cmp-cross">✗</span></td><td><span class="cmp-partial">~ Generic</span></td><td><span class="cmp-check">✓ Factual, scored</span></td></tr>
+              <tr><td>Handles vague/lifestyle queries</td><td><span class="cmp-cross">✗</span></td><td><span class="cmp-partial">~ Partial</span></td><td><span class="cmp-check">✓</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- How to use -->
+        <div class="cmp-howto">
+          <h2>How to see the comparison yourself</h2>
+          <p>After running any search, click <strong>⚖️ Compare Baselines</strong> in the results bar to run all three methods on your exact query and see the results side by side.</p>
+          <div class="cmp-steps">
+            <div class="cmp-step"><div class="cmp-step-num">1</div>Type your apartment query and click Search</div>
+            <div class="cmp-step"><div class="cmp-step-num">2</div>Review NestAI's AI-powered results</div>
+            <div class="cmp-step"><div class="cmp-step-num">3</div>Click ⚖️ Compare Baselines to see all 3 methods</div>
+          </div>
+        </div>
+
+      </div>
+    `;
+    return panel;
   }
 
   // ── Boot ──────────────────────────────────────────────────────────────────
@@ -379,28 +325,40 @@
   function init() {
     injectStyles();
 
-    // Remove old button if it exists
-    const old = document.getElementById("cmp-tab-btn");
-    if (old) old.remove();
+    const panel     = buildPanel();
+    const toggleBtn = document.createElement("button");
+    const closeBtn  = document.createElement("button");
 
-    const panel    = buildPanel();
-    const toggleBtn = el("button", { id: "cmp-toggle-btn" }, "⚡ Compare Methods");
-    const closeBtn  = el("button", { id: "cmp-close" }, "← Back to NestAI");
+    toggleBtn.id = "cmp-toggle-btn";
+    toggleBtn.innerHTML = '<span class="cmp-btn-dot"></span>⚡ Compare Methods';
+
+    closeBtn.id = "cmp-close";
+    closeBtn.innerHTML = "← Back";
 
     document.body.appendChild(panel);
     document.body.appendChild(toggleBtn);
     document.body.appendChild(closeBtn);
 
-    function toggle() {
-      const open = panel.classList.toggle("visible");
-      closeBtn.style.display  = open ? "block" : "none";
-      toggleBtn.textContent   = open ? "✕ Close" : "⚡ Compare Methods";
+    function open() {
+      panel.classList.add("visible");
+      closeBtn.style.display = "flex";
+      toggleBtn.style.display = "none";
+      document.body.style.overflow = "hidden";
+    }
+    function close() {
+      panel.classList.remove("visible");
+      closeBtn.style.display = "none";
+      toggleBtn.style.display = "flex";
+      document.body.style.overflow = "";
     }
 
-    toggleBtn.addEventListener("click", toggle);
-    closeBtn.addEventListener("click", toggle);
+    toggleBtn.addEventListener("click", open);
+    closeBtn.addEventListener("click", close);
 
-    console.log("[NestAI Compare v2] loaded.");
+    // Close on Escape key
+    document.addEventListener("keydown", e => { if (e.key === "Escape") close(); });
+
+    console.log("[NestAI Compare] info panel loaded.");
   }
 
   if (document.readyState === "loading") {

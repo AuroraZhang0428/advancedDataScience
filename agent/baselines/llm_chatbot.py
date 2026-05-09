@@ -26,7 +26,7 @@ from openai import OpenAI
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 MODEL = "gpt-4o-mini"
-MAX_LISTINGS_IN_PROMPT = 60    # balance context-window vs coverage (reduced for speed)
+MAX_LISTINGS_IN_PROMPT = 120   # balance context-window vs coverage
 TOP_N = 5                      # listings to ask the LLM to recommend
 RANDOM_SEED = 42
 

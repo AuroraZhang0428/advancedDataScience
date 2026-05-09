@@ -31,12 +31,8 @@
   const errorToast = $("errorToast");
   const errorMessage = $("errorMessage");
   const modalOverlay = $("modalOverlay");
-  const modalContent = $("modalContent");
   const compareBtn = $("compareBtn");
   const comparisonSection = $("comparisonSection");
-  const upgradeBanner = $("upgradeBanner");
-  const upgradeBtn = $("upgradeBtn");
-
 
   /* ── Chips ── */
   document.querySelectorAll(".chip").forEach((chip) => {
@@ -51,42 +47,14 @@
   queryInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSearch(); }
   });
-  upgradeBtn.addEventListener("click", optimizeWithAI);
 
-  // ── Phase 1: fast filter-based search (instant) ──────────────────────────
   async function doSearch() {
     const query = queryInput.value.trim();
     if (!query) return;
     lastBaseQuery = query;
 
-    setLoading(true, "Filtering listings…");
+    setLoading(true);
     resultsSection.style.display = "none";
-    hideToast();
-
-    try {
-      const res = await fetch(API + "/api/search/baseline-filter", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, dataset: savedDataset }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Search failed");
-      renderPhase1Results(query, data);
-    } catch (err) {
-      showToast(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // ── Phase 2: full NestAI agent (AI-powered, on demand) ───────────────────
-  async function optimizeWithAI() {
-    const query = lastBaseQuery || queryInput.value.trim();
-    if (!query) return;
-
-    upgradeBtn.disabled = true;
-    upgradeBtn.textContent = "⏳ Running AI agent…";
-    setLoading(true, "AI is scoring & ranking…");
     hideToast();
 
     try {
@@ -96,57 +64,16 @@
         body: JSON.stringify({ query, dataset: savedDataset }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "AI search failed");
+      if (!res.ok) throw new Error(data.error || "Search failed");
       lastAgentResult = data;
-      upgradeBanner.style.display = "none";
       renderResults(query, data);
       if (compareBtn) compareBtn.style.display = data.recommendations && data.recommendations.length ? "inline-flex" : "none";
       if (comparisonSection) comparisonSection.style.display = "none";
     } catch (err) {
       showToast(err.message);
-      upgradeBtn.disabled = false;
-      upgradeBtn.textContent = "✨ Optimize with NestAI";
     } finally {
       setLoading(false);
     }
-  }
-
-  // ── Render Phase 1 (filter baseline) results ─────────────────────────────
-  function renderPhase1Results(query, data) {
-    const recs = data.recommendations || [];
-
-    // Status bar
-    statusTitle.innerHTML = `Found ${recs.length} quick match${recs.length !== 1 ? "es" : ""} &nbsp;<span class="phase-badge phase-badge-fast">⚡ Filter</span>`;
-    statusSubtitle.textContent = recs.length
-      ? `Sorted by price · ${data.total_matched || recs.length} total matched`
-      : "No listings matched your filters — try broadening your search.";
-    statusIcon.textContent = recs.length ? "⚡" : "—";
-    statusIcon.style.background = "var(--amber-dim)";
-    statusIcon.style.color = "var(--amber)";
-
-    relaxBanner.style.display = "none";
-    questionBanner.style.display = "none";
-    querySummaryText.textContent = query;
-
-    // Hide AI panels (not available in phase 1)
-    if (preferencesPanel) preferencesPanel.style.display = "none";
-    if (agentTracePanel) agentTracePanel.style.display = "none";
-
-    // Render cards (reuse same card renderer, score=0 → no ring)
-    cardsGrid.innerHTML = "";
-    recs.forEach((rec, idx) => cardsGrid.appendChild(createCard(rec, idx, "")));
-
-    // Hide compare btn until agent runs
-    if (compareBtn) compareBtn.style.display = "none";
-    if (comparisonSection) comparisonSection.style.display = "none";
-
-    // Show upgrade banner
-    upgradeBtn.disabled = false;
-    upgradeBtn.textContent = "✨ Optimize with NestAI";
-    upgradeBanner.style.display = "flex";
-
-    resultsSection.style.display = "block";
-    resultsSection.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   /* ── Clarification flow ── */
@@ -329,14 +256,11 @@
   }
 
   /* ── Loading ── */
-  function setLoading(on, label) {
+  function setLoading(on) {
     loadingOverlay.style.display = on ? "flex" : "none";
     searchBtn.disabled = on;
     btnText.classList.toggle("hidden", on);
     btnSpinner.classList.toggle("hidden", !on);
-    const titleEl = loadingOverlay.querySelector(".loading-title");
-    if (titleEl && label) titleEl.textContent = label;
-    else if (titleEl) titleEl.textContent = "Finding your perfect home\u2026";
     if (on) animateSteps();
   }
 
@@ -616,6 +540,32 @@
     (rec.amenities || []).forEach((a) => { tagsHTML += `<span class="tag">${esc(a)}</span>`; });
     (rec.purpose_tags || []).forEach((t) => { tagsHTML += `<span class="tag">${esc(t)}</span>`; });
 
+    // Build Google Maps embed (no API key needed for iframe embed)
+    const lat = rec.latitude;
+    const lng = rec.longitude;
+    const mapHTML = (lat && lng)
+      ? `<div class="modal-section modal-map-section">
+          <h4>📍 Location</h4>
+          <div class="modal-map-wrap">
+            <iframe
+              class="modal-map"
+              loading="lazy"
+              referrerpolicy="no-referrer-when-downgrade"
+              src="https://maps.google.com/maps?q=${lat},${lng}&z=15&output=embed"
+              allowfullscreen>
+            </iframe>
+            <a class="map-open-link" href="https://www.google.com/maps?q=${lat},${lng}" target="_blank" rel="noopener">
+              Open in Google Maps ↗
+            </a>
+          </div>
+        </div>`
+      : `<div class="modal-section">
+          <h4>📍 Location</h4>
+          <a class="map-open-link map-open-link--solo"
+             href="https://www.google.com/maps/search/${encodeURIComponent((rec.neighborhood || '') + ' New York')}"
+             target="_blank" rel="noopener">Open neighborhood in Google Maps ↗</a>
+        </div>`;
+
     modalContent.innerHTML = `
       <div class="modal-inner">
         <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.25rem">
@@ -625,6 +575,8 @@
         <h2 class="modal-title">${esc(rec.title)}</h2>
         <p class="modal-neighborhood">📍 ${esc(rec.neighborhood)}${rec.neighborhood_group ? " · " + esc(rec.neighborhood_group) : ""}</p>
         <div class="modal-price">${priceText}<span style="font-size:.85rem;color:var(--text-dim);font-weight:400"> /night</span></div>
+
+        ${mapHTML}
 
         ${explanation ? `<div class="modal-section"><h4>AI Explanation</h4><div class="modal-explanation">${esc(explanation)}</div></div>` : ""}
 
@@ -674,8 +626,6 @@
     resultsSection.style.display = "none";
     if (preferencesPanel) preferencesPanel.style.display = "none";
     if (agentTracePanel) agentTracePanel.style.display = "none";
-    upgradeBanner.style.display = "none";
-    lastAgentResult = null;
     window.scrollTo({ top: 0, behavior: "smooth" });
     queryInput.focus();
   });
