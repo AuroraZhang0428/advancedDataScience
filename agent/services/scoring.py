@@ -177,8 +177,14 @@ def _require_llm_ranking() -> None:
         raise RuntimeError("OPENAI_API_KEY is required because deterministic LLM-ranking fallback has been removed.")
 
 
-def _candidate_summary(listing: dict[str, Any]) -> str:
-    """Create a compact candidate summary for LLM reranking."""
+def _candidate_summary(listing: dict[str, Any], topics: list[str] | None = None) -> str:
+    """Create a compact candidate summary for LLM reranking.
+
+    When topics are supplied the same topic-relevance ranking used for the
+    user-facing display is applied, so the LLM always scores on the same
+    reviews the user will see (top 10: 3 shown + 7 more).
+    """
+    from agent.services.reviews import _comment_topic_score  # local import avoids circular deps
 
     amenities = ", ".join(str(item) for item in listing.get("amenities", [])[:6]) or "none"
     neighborhood = listing.get("neighborhood") or listing.get("neighborhood_group") or "Unknown area"
@@ -188,21 +194,56 @@ def _candidate_summary(listing: dict[str, Any]) -> str:
     bathrooms = listing.get("bathrooms")
     review_rating = listing.get("review_rating")
     review_count = listing.get("raw", {}).get("number_of_reviews", 0)
-    sample_reviews = listing.get("raw", {}).get("sample_reviews", "No text reviews available.")
+    raw_sample = listing.get("raw", {}).get("sample_reviews", "")
     deterministic_score = float(listing.get("score", 0.0))
     scoring_weights_used = listing.get("scoring_weights_used", {})
-    
-    # Clean up sample reviews to prevent prompt injection or excessive length
-    clean_sample_reviews = str(sample_reviews).replace("\n", " ")[:300]
-    
+
+    # Parse JSON review array; fall back to plain string for legacy rows
+    import json as _json
+    records: list[dict] = []
+    try:
+        records = _json.loads(raw_sample) if raw_sample else []
+    except (ValueError, TypeError):
+        pass
+
+    # For scoring we prioritise completeness over display aesthetics:
+    # always include ALL critical reviews (up to 5) so the LLM never misses a
+    # negative signal, then fill remaining slots with topic-ranked recent ones.
+    # This differs slightly from the 2-recent+1-critical display layout, which
+    # is fine — scoring needs to be comprehensive, display needs to be readable.
+    _SCORING_LIMIT = 10
+    recent = [r for r in records if not r.get("critical")]
+    critical_recs = [r for r in records if r.get("critical")]
+
+    if topics and recent:
+        recent = sorted(
+            recent,
+            key=lambda r: _comment_topic_score(r.get("text", ""), topics),
+            reverse=True,
+        )
+
+    remaining_slots = max(0, _SCORING_LIMIT - len(critical_recs))
+    display_slice = critical_recs + recent[:remaining_slots]
+
+    review_text_parts: list[str] = []
+    for r in display_slice:
+        tag = "[critical]" if r.get("critical") else "[recent]"
+        line = f"{tag} [{r.get('date','')}] {r.get('name','')}: {r.get('text','').replace(chr(10), ' ')}"
+        review_text_parts.append(line)
+
+    if not review_text_parts and raw_sample and isinstance(raw_sample, str):
+        review_text_parts = [raw_sample.replace("\n", " ")[:600]]
+
+    reviews_block = "\n".join(review_text_parts) if review_text_parts else "No reviews available."
+
     return (
         f"id={listing.get('id')} | title={listing.get('title', 'Untitled')} | neighborhood={neighborhood} | "
         f"price={price_text} | bedrooms={bedrooms} | bathrooms={bathrooms} | "
         f"review_rating={review_rating} ({review_count} reviews) | "
-        f"sample_reviews: '{clean_sample_reviews}' | "
         f"wifi={listing.get('wifi')} | workspace={listing.get('workspace')} | quiet_score={listing.get('quiet_score')} | "
         f"purpose_tags={listing.get('purpose_tags', [])} | amenities={amenities} | "
-        f"coarse_retrieval_score={deterministic_score:.2f} | weights={scoring_weights_used}"
+        f"coarse_retrieval_score={deterministic_score:.2f} | weights={scoring_weights_used}\n"
+        f"reviews:\n{reviews_block}"
     )
 
 
@@ -210,6 +251,7 @@ def _rerank_with_llm(
     candidates: list[dict[str, Any]],
     soft_preferences: dict[str, Any],
     hard_constraints: dict[str, Any],
+    topics: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Rerank top candidates using an LLM when credentials are available."""
 
@@ -221,7 +263,7 @@ def _rerank_with_llm(
     try:
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
         structured_llm = llm.with_structured_output(RankingResponse)
-        candidate_block = "\n".join(_candidate_summary(candidate) for candidate in candidates)
+        candidate_block = "\n".join(_candidate_summary(candidate, topics=topics) for candidate in candidates)
         prompt = (
             "You are evaluating apartment listing candidates for the user's true intent.\n"
             "The coarse retrieval score was only used to gather a shortlist. Do not follow it mechanically.\n"
@@ -572,8 +614,17 @@ def rank_listings(
     hard_constraints: dict[str, Any],
     shortlist_size: int | None = None,
     weights: ScoringWeights | None = None,
+    user_query: str = "",
 ) -> list[dict[str, Any]]:
-    """Score listings, then optionally rerank the top candidates with an LLM."""
+    """Score listings, then optionally rerank the top candidates with an LLM.
+
+    ``user_query`` is used to detect review topics so the LLM reranker sees
+    the same topic-ranked review slice (top 10) that the user-facing display
+    will show — keeping the two views consistent.
+    """
+    from agent.services.reviews import detect_topics  # local import avoids circular deps
+
+    topics = detect_topics(user_query, soft_preferences)
 
     scored = [score_listing(listing, soft_preferences, hard_constraints, weights=weights) for listing in listings]
     scored.sort(
@@ -597,6 +648,7 @@ def rank_listings(
                 candidates=shortlist,
                 soft_preferences=soft_preferences,
                 hard_constraints=hard_constraints,
+                topics=topics,
             )
             llm_reranked.sort(
                 key=lambda item: (

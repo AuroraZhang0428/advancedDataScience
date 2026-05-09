@@ -20,6 +20,7 @@ from agent.graph import build_graph
 from agent.baselines.filter_search import run_filter_baseline
 from agent.baselines.llm_chatbot import run_llm_chatbot_baseline
 from agent.services.dataset import load_listings
+from agent.services.reviews import detect_topics, get_listing_comments, load_reviews_index
 from agent.orchestrator import run_orchestrator
 
 app = Flask(__name__, static_folder="frontend", static_url_path="")
@@ -29,6 +30,19 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 # Build the graph once at startup
 _graph = None
+
+# Reviews index: listing_id → list of comment dicts (loaded lazily on first search)
+_reviews_index: dict = {}
+_reviews_loaded = False
+
+
+def _ensure_reviews_loaded() -> None:
+    global _reviews_index, _reviews_loaded
+    if _reviews_loaded:
+        return
+    dataset_path = PROJECT_ROOT / str(DEFAULT_CONFIG.dataset_path)
+    _reviews_index = load_reviews_index(dataset_path)
+    _reviews_loaded = True
 
 # ── In-memory session store: {session_id: {state, created_at}} ───────────────
 _sessions: dict[str, dict] = {}
@@ -245,9 +259,16 @@ def _resume_pipeline(state: dict[str, Any]) -> dict[str, Any]:
         return state
 
 
-def _build_response(result: dict[str, Any]) -> dict[str, Any]:
+def _build_response(result: dict[str, Any], user_query: str = "") -> dict[str, Any]:
     """Convert final graph state into the JSON response shape."""
-    recommendations = [_listing_to_dict(r) for r in result.get("final_recommendations", [])]
+    _ensure_reviews_loaded()
+    topics = detect_topics(user_query, result.get("soft_preferences", {}))
+
+    recommendations = []
+    for r in result.get("final_recommendations", []):
+        rec = _listing_to_dict(r)
+        rec["comments"] = get_listing_comments(str(rec["id"]), _reviews_index, topics)
+        recommendations.append(rec)
     explanations = result.get("final_explanations", [])
     relaxation_history = result.get("relaxation_history", [])
     need_user_input = result.get("need_user_input", False)
@@ -316,7 +337,7 @@ def search():
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
-    return jsonify(_build_response(result))
+    return jsonify(_build_response(result, user_query=query))
 
 
 @app.route("/api/clarify", methods=["POST"])
@@ -350,7 +371,8 @@ def clarify():
     # updated in _build_response with a fresh session_id.
     del _sessions[session_id]
 
-    return jsonify(_build_response(result))
+    original_query = saved_state.get("user_query", "")
+    return jsonify(_build_response(result, user_query=original_query))
 
 
 @app.route("/api/search/baseline-filter", methods=["POST"])
@@ -414,4 +436,6 @@ def health():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5050)
+    # use_reloader=False prevents Flask from watching .uv-cache and restarting
+    # in an infinite loop when uv writes package files inside the project folder.
+    app.run(debug=True, port=5050, use_reloader=False)

@@ -250,6 +250,7 @@ def _score_and_rank(args: dict, state: dict) -> tuple[str, dict]:
         hard_constraints=state.get("hard_constraints", {}),
         shortlist_size=DEFAULT_CONFIG.shortlist_size,
         weights=weights,
+        user_query=state.get("user_query", ""),
     )
 
     sufficient, diagnostics = results_are_sufficient(

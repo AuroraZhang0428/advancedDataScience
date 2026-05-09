@@ -589,6 +589,8 @@
 
         ${rec.llm_rank_reason ? `<div class="modal-section"><h4>AI Ranking Reason</h4><p style="font-size:.85rem;color:var(--text-muted)">${esc(rec.llm_rank_reason)}</p></div>` : ""}
 
+        ${buildCommentsHTML(rec.comments)}
+
         <div class="feedback-box">
           <h4>Not quite right?</h4>
           <p>Give the agent feedback and it will rethink the recommendation.</p>
@@ -607,6 +609,101 @@
     modalOverlay.style.display = "flex";
     document.body.style.overflow = "hidden";
   }
+
+  /* ── Guest Comments ── */
+  function buildCommentsHTML(comments) {
+    if (!comments || !comments.shown || comments.shown.length === 0) return "";
+
+    const hasTopics = !!comments.has_topics;
+    const BATCH = 4;
+
+    const renderComment = (c, badge) => {
+      const badgeHTML = badge
+        ? `<span class="review-badge ${badge.cls}">${badge.icon} ${badge.label}</span>`
+        : "";
+      return `
+        <div class="review-comment">
+          ${badgeHTML}
+          <div class="review-meta">
+            <span class="review-author">${esc(c.reviewer_name)}</span>
+            ${c.date ? `<span class="review-date">${esc(c.date)}</span>` : ""}
+          </div>
+          <p class="review-text">${esc(c.comment)}</p>
+        </div>`;
+    };
+
+    // Shown cards with per-card badges
+    const shownHTML = comments.shown.map((c) => {
+      let badge;
+      if (c.critical) {
+        badge = { cls: "badge-critical", icon: "⚠️", label: "Critical review" };
+      } else if (hasTopics) {
+        badge = { cls: "badge-relevant", icon: "🔍", label: "Relevant to your search" };
+      } else {
+        badge = { cls: "badge-recent", icon: "🕐", label: "Most recent" };
+      }
+      return renderComment(c, badge);
+    }).join("");
+
+    const totalLabel = comments.total > 0
+      ? `<span class="review-count">${comments.total} review${comments.total !== 1 ? "s" : ""}</span>`
+      : "";
+
+    const hasCriticalShown = comments.shown.some((c) => c.critical);
+    const selectionNote = `<p class="review-selection-note">${
+      hasTopics
+        ? `Showing 2 reviews most relevant to your query${hasCriticalShown ? " · 1 critical review pinned" : ""}`
+        : `Showing 2 most recent reviews${hasCriticalShown ? " · 1 critical review pinned" : ""}`
+    }</p>`;
+
+    // Paginated "more" section — render all reviews pre-grouped in batches
+    let moreSection = "";
+    const moreList = comments.more || [];
+    if (moreList.length > 0) {
+      const batches = [];
+      for (let i = 0; i < moreList.length; i += BATCH) {
+        const batchItems = moreList.slice(i, i + BATCH).map((c) => renderComment(c, null)).join("");
+        batches.push(`<div class="review-batch" style="display:none">${batchItems}</div>`);
+      }
+      const firstBatchSize = Math.min(BATCH, moreList.length);
+      moreSection = `
+        <div class="reviews-more-container" data-batch-index="0" data-total-batches="${batches.length}">
+          ${batches.join("")}
+          <button class="show-more-reviews-btn">Show ${firstBatchSize} more review${firstBatchSize !== 1 ? "s" : ""} ▾</button>
+        </div>`;
+    }
+
+    return `
+      <div class="modal-section">
+        <h4>Guest Reviews ${totalLabel}</h4>
+        ${selectionNote}
+        <div class="reviews-list">${shownHTML}${moreSection}</div>
+      </div>`;
+  }
+
+  // Delegate paginated "Show more" clicks inside the modal
+  document.getElementById("modalContent").addEventListener("click", (e) => {
+    const btn = e.target.closest(".show-more-reviews-btn");
+    if (!btn) return;
+
+    const container = btn.closest(".reviews-more-container");
+    const batches = container.querySelectorAll(".review-batch");
+    const batchIndex = parseInt(container.dataset.batchIndex || "0", 10);
+    const totalBatches = parseInt(container.dataset.totalBatches || "0", 10);
+
+    if (batchIndex < totalBatches) {
+      batches[batchIndex].style.display = "block";
+      const nextIndex = batchIndex + 1;
+      container.dataset.batchIndex = nextIndex;
+
+      if (nextIndex < totalBatches) {
+        const nextBatchSize = batches[nextIndex].querySelectorAll(".review-comment").length;
+        btn.textContent = `Show ${nextBatchSize} more review${nextBatchSize !== 1 ? "s" : ""} ▾`;
+      } else {
+        btn.style.display = "none";
+      }
+    }
+  });
 
   function closeModal() {
     modalOverlay.style.display = "none";
