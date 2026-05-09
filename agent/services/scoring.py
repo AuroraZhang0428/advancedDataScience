@@ -187,11 +187,13 @@ def _candidate_summary(listing: dict[str, Any]) -> str:
     bedrooms = listing.get("bedrooms")
     bathrooms = listing.get("bathrooms")
     review_rating = listing.get("review_rating")
+    review_count = listing.get("raw", {}).get("number_of_reviews", 0)
     deterministic_score = float(listing.get("score", 0.0))
     scoring_weights_used = listing.get("scoring_weights_used", {})
     return (
         f"id={listing.get('id')} | title={listing.get('title', 'Untitled')} | neighborhood={neighborhood} | "
-        f"price={price_text} | bedrooms={bedrooms} | bathrooms={bathrooms} | review_rating={review_rating} | "
+        f"price={price_text} | bedrooms={bedrooms} | bathrooms={bathrooms} | "
+        f"review_rating={review_rating} ({review_count} reviews) | "
         f"wifi={listing.get('wifi')} | workspace={listing.get('workspace')} | quiet_score={listing.get('quiet_score')} | "
         f"purpose_tags={listing.get('purpose_tags', [])} | amenities={amenities} | "
         f"coarse_retrieval_score={deterministic_score:.2f} | weights={scoring_weights_used}"
@@ -305,6 +307,20 @@ def compute_review_score(listing: dict[str, Any], soft_preferences: dict[str, An
         return 0.50
 
     base = _clip(rating / 5.0)
+    
+    # Factor in review volume for confidence
+    num_reviews = _safe_float(listing.get("raw", {}).get("number_of_reviews")) or 0.0
+    if num_reviews > 50:
+        confidence = 1.0
+    elif num_reviews > 10:
+        confidence = 0.95
+    elif num_reviews > 0:
+        confidence = 0.90
+    else:
+        confidence = 0.85
+        
+    base = _clip(base * confidence)
+
     desired_min = _safe_float(soft_preferences.get("review_min_rating"))
     if desired_min is None:
         return base
