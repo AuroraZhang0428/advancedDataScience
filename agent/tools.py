@@ -73,6 +73,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "description": (
                 "Change a hard constraint to widen the search. Supported constraints: "
                 "max_price (number), min_bedrooms (integer), min_bathrooms (number). "
+                "CRITICAL: Only INCREASE max_price or DECREASE min_bedrooms/min_bathrooms. "
+                "Never set a new constraint if it was previously unrestricted (None). "
                 "After calling this, call filter_listings to apply it."
             ),
             "parameters": {
