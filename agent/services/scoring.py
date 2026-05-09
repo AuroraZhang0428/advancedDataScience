@@ -188,12 +188,18 @@ def _candidate_summary(listing: dict[str, Any]) -> str:
     bathrooms = listing.get("bathrooms")
     review_rating = listing.get("review_rating")
     review_count = listing.get("raw", {}).get("number_of_reviews", 0)
+    sample_reviews = listing.get("raw", {}).get("sample_reviews", "No text reviews available.")
     deterministic_score = float(listing.get("score", 0.0))
     scoring_weights_used = listing.get("scoring_weights_used", {})
+    
+    # Clean up sample reviews to prevent prompt injection or excessive length
+    clean_sample_reviews = str(sample_reviews).replace("\n", " ")[:300]
+    
     return (
         f"id={listing.get('id')} | title={listing.get('title', 'Untitled')} | neighborhood={neighborhood} | "
         f"price={price_text} | bedrooms={bedrooms} | bathrooms={bathrooms} | "
         f"review_rating={review_rating} ({review_count} reviews) | "
+        f"sample_reviews: '{clean_sample_reviews}' | "
         f"wifi={listing.get('wifi')} | workspace={listing.get('workspace')} | quiet_score={listing.get('quiet_score')} | "
         f"purpose_tags={listing.get('purpose_tags', [])} | amenities={amenities} | "
         f"coarse_retrieval_score={deterministic_score:.2f} | weights={scoring_weights_used}"
