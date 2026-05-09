@@ -82,17 +82,16 @@ python app.py
 |---|---|
 | `OPENAI_API_KEY` | Query parsing, reasoning, and explanation generation |
 
-You can enter your key directly in the **Settings** panel in the web UI, or set it as an environment variable:
+You must create a `.env` file in the root directory of the project and add your key:
 
-**Mac / Linux:**
-```bash
-export OPENAI_API_KEY="sk-..."
-python app.py
+```env
+OPENAI_API_KEY=sk-...
 ```
 
-**Windows (PowerShell):**
-```powershell
-$env:OPENAI_API_KEY="sk-..."
+Alternatively, you can export it in your terminal before running the app:
+
+```bash
+export OPENAI_API_KEY="sk-..."
 python app.py
 ```
 
@@ -109,13 +108,13 @@ The agent will use the `enrich_with_location` tool automatically when this key i
 ## Using the Web UI
 
 1. Open **http://localhost:5050**
-2. Enter your OpenAI API key in the **Settings** panel (top right)
-3. Type a natural-language query, for example:
+2. Type a natural-language query, for example:
    - *"2-bedroom with WiFi and good reviews in Brooklyn under $200/night"*
    - *"Quiet remote-work apartment near a subway station in Manhattan"*
    - *"Affordable private room in Williamsburg"*
-4. Click **Search** — the agent will reason through the results and adapt if needed (~5–15 seconds)
-5. Click any result card to see the full score breakdown and explanation
+3. Click **Search** — the agent will reason through the results and adapt if needed (~5–10 seconds)
+4. Click any result card to see the full score breakdown, an AI explanation, and an interactive **Google Maps** embed of the location.
+5. Click the **⚡ Compare Methods** button at the top right to learn how NestAI compares against basic filter searches and standard LLM chatbots. After a search, click **⚖️ Compare Baselines** to see the results side-by-side.
 
 ---
 
