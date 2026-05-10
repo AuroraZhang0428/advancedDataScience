@@ -694,36 +694,44 @@ body {
   line-height: 1.5;
 }
 
-.feedback-actions {
+.refine-input-row {
   display: flex;
-  flex-wrap: wrap;
   gap: .5rem;
+  align-items: flex-start;
 }
 
-.feedback-btn {
-  border: 1px solid rgba(139,92,246,.24);
-  border-radius: 999px;
-  padding: .48rem .75rem;
-  background: rgba(139,92,246,.10);
+.refine-input-row .clarify-textarea {
+  flex: 1;
+  min-height: 2.6rem;
+  resize: none;
+}
+
+.refine-submit-btn {
+  flex-shrink: 0;
+  border: 1px solid rgba(139,92,246,.34);
+  border-radius: var(--radius-sm);
+  padding: .55rem .9rem;
+  background: rgba(139,92,246,.14);
   color: var(--accent-light);
   cursor: pointer;
   font-family: var(--font);
-  font-size: .75rem;
+  font-size: .78rem;
   font-weight: 700;
   transition: all .2s;
+  white-space: nowrap;
 }
 
-.feedback-btn:hover {
-  transform: translateY(-1px);
-  background: rgba(139,92,246,.18);
+.refine-submit-btn:hover {
+  background: rgba(139,92,246,.24);
   border-color: var(--accent);
+  transform: translateY(-1px);
 }
 
 @media (max-width: 720px) {
   .preferences-grid { flex-direction: column; }
   .preference-chip { min-width: 0; }
-  .feedback-actions { flex-direction: column; }
-  .feedback-btn { width: 100%; }
+  .refine-input-row { flex-direction: column; }
+  .refine-submit-btn { width: 100%; }
 }
 
 /* ─── Baseline Comparison Panel ─── */
