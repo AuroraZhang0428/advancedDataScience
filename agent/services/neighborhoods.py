@@ -63,6 +63,76 @@ DESTINATION_ALIASES: dict[str, str] = {
     "times square": "midtown",
 }
 
+# Maps colloquial area names, landmarks, and abbreviations to canonical NYC neighborhood names.
+# Used by resolve_neighborhood_alias() to improve neighborhood preference matching.
+NEIGHBORHOOD_ALIASES: dict[str, str] = {
+    # Landmarks → nearest residential neighborhood
+    "central park": "upper west side",
+    "central park west": "upper west side",
+    "central park south": "midtown",
+    "central park east": "upper east side",
+    "prospect park": "park slope",
+    "high line": "chelsea",
+    "the high line": "chelsea",
+    "brooklyn bridge park": "brooklyn heights",
+    "times square": "midtown",
+    "rockefeller center": "midtown",
+    "empire state building": "midtown",
+    "grand central": "midtown",
+    "penn station": "hell's kitchen",
+    "world trade center": "financial district",
+    "one world trade": "financial district",
+    "wall street": "financial district",
+    "battery park": "financial district",
+    "columbia university": "morningside heights",
+    "nyu": "greenwich village",
+    "hunter college": "upper east side",
+    "fordham lincoln center": "upper west side",
+    "brooklyn navy yard": "williamsburg",
+    "citi field": "flushing",
+    "yankee stadium": "mott haven",
+    # Common abbreviations
+    "les": "lower east side",
+    "ues": "upper east side",
+    "uws": "upper west side",
+    "fidi": "financial district",
+    "wv": "west village",
+    "ev": "east village",
+    "hk": "hell's kitchen",
+    # Colloquial / informal names
+    "the village": "greenwich village",
+    "hells kitchen": "hell's kitchen",
+    "clinton": "hell's kitchen",
+    "flatiron": "flatiron district",
+    "union square": "flatiron district",
+    "nolita": "soho",
+    "noho": "greenwich village",
+    "dumbo": "downtown brooklyn",
+    "boerum hill": "downtown brooklyn",
+    "cobble hill": "downtown brooklyn",
+    "carroll gardens": "downtown brooklyn",
+    "fort greene": "downtown brooklyn",
+    "clinton hill": "downtown brooklyn",
+    "brooklyn heights": "downtown brooklyn",
+    "bed-stuy": "bedford-stuyvesant",
+    "bed stuy": "bedford-stuyvesant",
+    "bedstuy": "bedford-stuyvesant",
+    "bedford stuyvesant": "bedford-stuyvesant",
+    "south bronx": "mott haven",
+    "spanish harlem": "east harlem",
+    "el barrio": "east harlem",
+    "downtown manhattan": "financial district",
+    "midtown manhattan": "midtown",
+    "uptown": "upper west side",
+    "the lower east side": "lower east side",
+    "the upper east side": "upper east side",
+    "the upper west side": "upper west side",
+    "greenwood heights": "park slope",
+    "windsor terrace": "park slope",
+    "north brooklyn": "williamsburg",
+    "fresh pond": "ridgewood",
+}
+
 TRANSIT_TITLE_KEYWORDS = ["subway", "train", "metro", "station", "commute", "transit"]
 FOOD_TITLE_KEYWORDS = ["restaurant", "restaurants", "dining", "cafes", "coffee", "eatery", "food"]
 
@@ -118,6 +188,16 @@ def load_neighborhood_centers() -> dict[str, dict[str, Any]]:
         }
 
     return centers
+
+
+def resolve_neighborhood_alias(preferred: str) -> str:
+    """Resolve a colloquial area name, landmark, or abbreviation to its canonical NYC neighborhood.
+
+    Returns the canonical neighborhood name if found in ``NEIGHBORHOOD_ALIASES``,
+    otherwise returns the normalized input unchanged.
+    """
+    normalized = _normalize(preferred)
+    return NEIGHBORHOOD_ALIASES.get(normalized, normalized)
 
 
 def resolve_place_reference(place: str) -> dict[str, Any] | None:
