@@ -161,6 +161,11 @@ class RunResult:
     tool_use_failure: bool = False   # tool crashed mid-loop
     error: str | None = None
 
+    # Agent-specific fields (always 0 for baselines)
+    relaxation_count: int = 0        # how many times adjust_constraint was called
+    asked_user: bool = False         # did the agent ask the user a clarifying question
+    recovered: bool = False          # failed initial search but recovered via relaxation
+
 
 @dataclass
 class EvalResult:
@@ -179,6 +184,11 @@ class EvalResult:
     cs_macro: bool = False
 
     final_pass: bool = False
+
+    # Agent-specific metrics (always 0/False for baselines)
+    relaxation_count: int = 0
+    asked_user: bool = False
+    recovered: bool = False
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -275,6 +285,9 @@ def evaluate(query: Query, run: RunResult, dataset_ids: set[str]) -> EvalResult:
         difficulty=query.difficulty,
         delivered=run.delivered,
         tool_use_failure=run.tool_use_failure,
+        relaxation_count=run.relaxation_count,
+        asked_user=run.asked_user,
+        recovered=run.recovered,
     )
 
     if not run.delivered or not run.listings:
@@ -368,8 +381,26 @@ def run_agent(q: Query, dataset_path: str) -> RunResult:
                     tool_failure = True
                     break
 
+        # ── Agent-specific metrics ────────────────────────────────────────
+        relaxation_history = state.get("relaxation_history") or []
+        relaxation_count   = len(relaxation_history)
+
+        asked_user = bool(state.get("need_user_input") or state.get("questions_asked"))
+
+        # "recovered" = agent initially found 0 results but relaxed and delivered
+        tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+        had_empty = any(
+            "0 listings" in str(m.get("content", "")).lower() or
+            "no listings" in str(m.get("content", "")).lower()
+            for m in tool_msgs
+        )
+        recovered = had_empty and bool(recs)
+
         return RunResult(q.qid, "nestai-agent", bool(recs), recs,
-                         steps=steps, tool_use_failure=tool_failure)
+                         steps=steps, tool_use_failure=tool_failure,
+                         relaxation_count=relaxation_count,
+                         asked_user=asked_user,
+                         recovered=recovered)
     except Exception as exc:
         tb = traceback.format_exc()
         tool_failure = "tool" in tb.lower() or "execute_tool" in tb.lower()
@@ -417,6 +448,10 @@ def print_report(results: list[EvalResult]) -> None:
     def hd_macro(rs):   return _pct([float(r.hard_macro) for r in rs if r.delivered])
     def tooluse(rs):    return f"{sum(r.tool_use_failure for r in rs):>{S-1}}  "
     def final(rs):      return _pct([float(r.final_pass) for r in rs])
+    # Agent-specific
+    def relaxations(rs): return f"{sum(r.relaxation_count for r in rs):>{S-1}}  "
+    def recovered(rs):   return _pct([float(r.recovered) for r in rs])
+    def asked(rs):       return f"{sum(r.asked_user for r in rs):>{S-1}}  "
 
     print(row("Delivery Rate",              delivery))
     print(row("Commonsense Pass  (Micro)",  cs_micro))
@@ -425,6 +460,12 @@ def print_report(results: list[EvalResult]) -> None:
     print(row("Hard Constraint   (Macro)",  hd_macro))
     print(row("Tool-use Failures  (#)",     tooluse))
     print(row("Final Pass Rate  ★",         final))
+    print()
+    print("  Agent-specific metrics (baselines always 0):")
+    print("─" * W)
+    print(row("Constraint Relaxations (#)", relaxations))
+    print(row("Graceful Recovery Rate",     recovered))
+    print(row("Clarification Asked  (#)",   asked))
 
     # ── Difficulty breakdown ──────────────────────────────────────────────
     print()
@@ -540,6 +581,10 @@ def main() -> None:
                 "final_pass": ev.final_pass,
                 "steps": run.steps, "elapsed_s": elapsed,
                 "hard_detail": ev.hard, "cs_detail": ev.cs,
+                # agent-specific
+                "relaxation_count": run.relaxation_count,
+                "asked_user": run.asked_user,
+                "recovered": run.recovered,
             })
 
     # ── Print report ──────────────────────────────────────────────────────
