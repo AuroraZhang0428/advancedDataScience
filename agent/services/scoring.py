@@ -111,12 +111,32 @@ def resolve_scoring_weights(
     soft_preferences: dict[str, Any],
     fallback: ScoringWeights | None = None,
 ) -> ScoringWeights:
-    """Resolve query-specific scoring weights inferred from the user's priorities."""
+    """Resolve query-specific scoring weights inferred from the user's priorities.
+
+    When the user specifies preferred neighborhoods or commute destinations, we
+    enforce a minimum neighborhood_fit weight of 0.40 so that location-explicit
+    queries cannot be won by a far-away listing with better amenities/reviews.
+    """
 
     fallback_weights = fallback or DEFAULT_CONFIG.scoring_weights
+    has_location_preference = bool(
+        soft_preferences.get("preferred_neighborhoods") or soft_preferences.get("commute_destinations")
+    )
     raw_weights = dict(soft_preferences.get("priority_weights") or {})
+
     if not raw_weights:
-        return fallback_weights
+        if not has_location_preference:
+            return fallback_weights
+        # Location specified but no explicit priority_weights from LLM →
+        # boost neighborhood_fit to 0.40 and reduce all others proportionally.
+        base = dict(fallback_weights.as_dict())
+        old_nf = base["neighborhood_fit"]
+        target_nf = 0.40
+        if old_nf < target_nf:
+            scale = (1.0 - target_nf) / (1.0 - old_nf)
+            for key in base:
+                base[key] = base[key] * scale if key != "neighborhood_fit" else target_nf
+        return ScoringWeights(**base)
 
     keys = list(fallback_weights.as_dict().keys())
     cleaned: dict[str, float] = {}
@@ -134,6 +154,18 @@ def resolve_scoring_weights(
         return fallback_weights
 
     normalized = {key: cleaned[key] / total for key in keys}
+
+    # Enforce minimum neighborhood_fit weight when location is explicit,
+    # even if the LLM-supplied priority_weights under-weighted it.
+    if has_location_preference and normalized.get("neighborhood_fit", 0.0) < 0.40:
+        deficit = 0.40 - normalized["neighborhood_fit"]
+        normalized["neighborhood_fit"] = 0.40
+        other_keys = [k for k in normalized if k != "neighborhood_fit"]
+        others_total = sum(normalized[k] for k in other_keys)
+        if others_total > 0:
+            for k in other_keys:
+                normalized[k] -= deficit * (normalized[k] / others_total)
+
     return ScoringWeights(
         review_rating=normalized["review_rating"],
         amenity_match=normalized["amenity_match"],
@@ -264,6 +296,17 @@ def _rerank_with_llm(
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
         structured_llm = llm.with_structured_output(RankingResponse)
         candidate_block = "\n".join(_candidate_summary(candidate, topics=topics) for candidate in candidates)
+        preferred_neighborhoods = soft_preferences.get("preferred_neighborhoods") or []
+        location_warning = ""
+        if preferred_neighborhoods:
+            location_warning = (
+                "\n⚠️  GEOGRAPHIC ACCURACY IS THE TOP PRIORITY for this query.\n"
+                f"The user asked to be near: {', '.join(str(n) for n in preferred_neighborhoods)}.\n"
+                "Any listing in a clearly different neighborhood or borough must receive a LOW neighborhood_fit "
+                "score (≤ 0.30) and should rank BELOW listings that are actually in or adjacent to the requested area, "
+                "regardless of how good their reviews, amenities, or price are.\n"
+                "Do not let excellent non-location attributes compensate for being in the wrong place.\n"
+            )
         prompt = (
             "You are evaluating apartment listing candidates for the user's true intent.\n"
             "The coarse retrieval score was only used to gather a shortlist. Do not follow it mechanically.\n"
@@ -271,7 +314,8 @@ def _rerank_with_llm(
             "Treat any stated budget as a nightly target/ceiling unless explicitly monthly.\n"
             "Return all candidate ids sorted best to worst with fit_score values between 0.0 and 1.0.\n"
             "Also return component_scores for review_rating, amenity_match, purpose_alignment, neighborhood_fit, and price_score.\n"
-            "Use the user's priority_weights as guidance for what matters most, but do not compute a rigid weighted average.\n\n"
+            "Use the user's priority_weights as guidance for what matters most, but do not compute a rigid weighted average.\n"
+            f"{location_warning}\n"
             f"Hard constraints:\n{hard_constraints}\n\n"
             f"Soft preferences:\n{soft_preferences}\n\n"
             f"Candidates:\n{candidate_block}\n"
@@ -426,7 +470,7 @@ def compute_neighborhood_score(listing: dict[str, Any], soft_preferences: dict[s
     neighborhood = str(listing.get("neighborhood") or "").lower()
     neighborhood_group = str(listing.get("neighborhood_group") or "").lower()
     if preferences:
-        best = 0.20
+        best = 0.05  # intentionally low — a listing with no match should rank below any near-match
         for preferred in preferences:
             if preferred == neighborhood:
                 best = max(best, 1.0)
