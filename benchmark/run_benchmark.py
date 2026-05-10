@@ -1,7 +1,7 @@
 """
 NestAI Offline Benchmark
 ========================
-Standalone terminal script — do NOT import from app.py or the frontend.
+Standalone terminal script 
 
 Runs 15 fixed queries through all 3 systems and prints a TravelPlanner-style
 comparison table for the final report.
