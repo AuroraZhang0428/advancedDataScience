@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib import error, request
 
@@ -740,14 +741,20 @@ def enrich_and_rerank_listings(
 
     enriched_listings: list[dict[str, Any]] = []
     warnings: list[str] = list(destination_warnings)
-    for listing in listings:
-        enriched, listing_warnings = _enrich_listing(
-            listing,
-            resolved_destinations=resolved_destinations,
-            soft_preferences=soft_preferences,
-        )
-        warnings.extend(listing_warnings)
-        enriched_listings.append(enriched)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {
+            executor.submit(
+                _enrich_listing,
+                listing,
+                resolved_destinations,
+                soft_preferences,
+            ): listing
+            for listing in listings
+        }
+        for future in as_completed(futures):
+            enriched, listing_warnings = future.result()
+            warnings.extend(listing_warnings)
+            enriched_listings.append(enriched)
 
     enriched_listings.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
 
