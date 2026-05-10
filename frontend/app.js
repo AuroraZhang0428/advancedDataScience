@@ -6,9 +6,6 @@
   let savedDataset = "matched_subset_dataset.csv";
   let lastBaseQuery = "";
   let lastAgentResult = null;
-  // Query history: first entry is the original query, subsequent entries are refinements.
-  // Accumulated so the model always sees full context across multiple refinement rounds.
-  let queryHistory = [];
 
   /* ── DOM refs ── */
   const $ = (s) => document.getElementById(s);
@@ -47,29 +44,10 @@
   });
 
   /* ── Search ── */
-  // Fresh search: resets history so prior refinements don't bleed into a new intent.
-  function triggerFreshSearch() {
-    const query = queryInput.value.trim();
-    if (!query) return;
-    queryHistory = [query];
-    doSearch();
-  }
-
-  searchBtn.addEventListener("click", triggerFreshSearch);
+  searchBtn.addEventListener("click", doSearch);
   queryInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); triggerFreshSearch(); }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSearch(); }
   });
-
-  // Build the combined query string from accumulated history segments.
-  function buildCombinedQuery() {
-    if (!queryHistory.length) return lastBaseQuery;
-    if (queryHistory.length === 1) return queryHistory[0];
-    const [original, ...rest] = queryHistory;
-    const refinements = rest.map((r, i) =>
-      (i === 0 ? "Refinement: " : "Further refinement: ") + r
-    );
-    return [original, ...refinements].join(". ");
-  }
 
   async function doSearch() {
     const query = queryInput.value.trim();
@@ -123,14 +101,10 @@
     }
   }
 
-  async function submitRefinement() {
-    const textarea = modalContent.querySelector(".refine-textarea");
-    const text = (textarea?.value || "").trim();
-    if (!text) return;
-    // Seed history from lastBaseQuery if this is the first refinement
-    if (!queryHistory.length) queryHistory = [lastBaseQuery || queryInput.value.trim()];
-    queryHistory.push(text);
-    queryInput.value = buildCombinedQuery();
+  async function searchWithFeedback(feedback) {
+    const originalQuery = lastBaseQuery || querySummaryText.textContent || queryInput.value.trim();
+    const revisedQuery = originalQuery + ". User feedback: " + feedback;
+    queryInput.value = revisedQuery;
     closeModal();
     await doSearch();
   }
@@ -662,17 +636,17 @@
 
         <div class="feedback-box">
           <h4>Not quite right?</h4>
-          <p>Tell the agent what to change — it will refine the search while keeping everything else you asked for.</p>
-          <div class="refine-input-row">
-            <textarea class="clarify-textarea refine-textarea" rows="2" placeholder="e.g. &quot;too far from the park&quot; or &quot;I need a quieter street&quot;"></textarea>
-            <button class="refine-submit-btn">Refine search →</button>
+          <p>Give the agent feedback and it will rethink the recommendation.</p>
+          <div class="feedback-actions">
+            <button class="feedback-btn" data-feedback="These options are too expensive. Please find cheaper listings and prioritize price more.">Too expensive</button>
+            <button class="feedback-btn" data-feedback="I want a better location or closer transit access. Please prioritize location more.">Better location</button>
+            <button class="feedback-btn" data-feedback="I care more about review quality and overall comfort. Please prioritize higher-rated listings.">Better reviews</button>
           </div>
         </div>
       </div>`;
 
-    modalContent.querySelector(".refine-submit-btn")?.addEventListener("click", submitRefinement);
-    modalContent.querySelector(".refine-textarea")?.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitRefinement(); }
+    modalContent.querySelectorAll(".feedback-btn").forEach((btn) => {
+      btn.addEventListener("click", () => searchWithFeedback(btn.dataset.feedback));
     });
 
     modalOverlay.style.display = "flex";
