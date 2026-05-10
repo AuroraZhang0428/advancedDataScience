@@ -12,6 +12,9 @@ from agent.services.neighborhoods import (
     compute_commute_score,
     compute_food_score,
     compute_transit_score,
+    haversine_km,
+    resolve_neighborhood_alias,
+    resolve_place_reference,
 )
 
 try:
@@ -66,6 +69,23 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _haversine_to_neighborhood_score(dist_km: float) -> float:
+    """Convert haversine distance (km) to a neighbourhood proximity score in [0, 1].
+
+    Used as the geographic floor for listings when the preferred neighbourhood
+    can be resolved to coordinates but does not match by name.
+    """
+    if dist_km <= 1.0:
+        return 0.85
+    if dist_km <= 2.5:
+        return 0.65
+    if dist_km <= 5.0:
+        return 0.45
+    if dist_km <= 9.0:
+        return 0.25
+    return 0.12
 
 
 def _effective_nightly_budget(hard_constraints: dict[str, Any]) -> float | None:
@@ -418,27 +438,64 @@ def compute_purpose_alignment(listing: dict[str, Any], soft_preferences: dict[st
 
 
 def compute_neighborhood_score(listing: dict[str, Any], soft_preferences: dict[str, Any]) -> float | None:
-    """Score location fit against neighborhood, commute, transit, and food preferences."""
+    """Score location fit against neighborhood, commute, transit, and food preferences.
+
+    Three layers of intelligence are applied:
+
+    Fix 1 – Live transit/food scores: when the listing has been enriched by Google
+    Maps (``location_context["google_maps_enriched"] == True``), the real scores
+    computed from nearby Places API results are used instead of the static lookup
+    tables in ``neighborhoods.py``.
+
+    Fix 2 – Alias-resolved neighborhood matching: before running SequenceMatcher,
+    the preferred neighbourhood string is normalised through ``NEIGHBORHOOD_ALIASES``
+    (e.g. "central park" → "upper west side", "les" → "lower east side") so that
+    colloquial names and landmarks map to the right canonical neighbourhood.
+
+    Fix 3 – Haversine distance floor: when listing coordinates are available and the
+    preferred neighbourhood can be resolved to a centroid via
+    ``resolve_place_reference()``, the flat 0.20 floor is replaced by a proximity
+    score derived from the straight-line distance (km). A listing two blocks away
+    earns a high floor; one across the borough earns a low one.
+    """
 
     preferences = [str(item).lower() for item in soft_preferences.get("preferred_neighborhoods", [])]
     explicit_neighborhood_score: float | None = None
 
     neighborhood = str(listing.get("neighborhood") or "").lower()
     neighborhood_group = str(listing.get("neighborhood_group") or "").lower()
-    if preferences:
-        best = 0.20
-        for preferred in preferences:
-            if preferred == neighborhood:
-                best = max(best, 1.0)
-                continue
-            if preferred in neighborhood or neighborhood in preferred:
-                best = max(best, 0.90)
-                continue
-            if preferred == neighborhood_group or preferred in neighborhood_group:
-                best = max(best, 0.75)
-                continue
 
-            similarity = SequenceMatcher(None, preferred, neighborhood).ratio()
+    if preferences:
+        listing_lat = listing.get("latitude")
+        listing_lon = listing.get("longitude")
+        best = 0.20  # default floor; overridden by haversine when coordinates available
+
+        for preferred in preferences:
+            # Fix 2: Resolve colloquial name / landmark to canonical neighbourhood.
+            canonical = resolve_neighborhood_alias(preferred)
+
+            # Fix 3: Geographic distance floor.
+            if listing_lat is not None and listing_lon is not None:
+                centroid = resolve_place_reference(preferred)
+                if centroid and centroid.get("latitude") and centroid.get("longitude"):
+                    dist_km = haversine_km(
+                        float(listing_lat), float(listing_lon),
+                        float(centroid["latitude"]), float(centroid["longitude"]),
+                    )
+                    best = max(best, _haversine_to_neighborhood_score(dist_km))
+
+            # Name-level matching: check both the original label and the canonical alias.
+            for check in ([preferred] if canonical == preferred else [preferred, canonical]):
+                if check == neighborhood:
+                    best = max(best, 1.0)
+                elif check in neighborhood or neighborhood in check:
+                    best = max(best, 0.90)
+                elif check == neighborhood_group or check in neighborhood_group:
+                    best = max(best, 0.75)
+
+            # Fuzzy fallback on the canonical form (character similarity is more meaningful
+            # when both sides are proper neighbourhood names rather than landmarks).
+            similarity = SequenceMatcher(None, canonical, neighborhood).ratio()
             best = max(best, similarity * 0.70)
 
         if soft_preferences.get("expanded_neighborhood_search"):
@@ -461,11 +518,23 @@ def compute_neighborhood_score(listing: dict[str, Any], soft_preferences: dict[s
     if commute_score is not None:
         component_scores.append((commute_score, w_commute))
 
+    # Fix 1: Prefer live Google Maps scores over static lookup tables when available.
+    location_ctx = listing.get("location_context") or {}
+    gm_enriched = bool(location_ctx.get("google_maps_enriched"))
+
     if soft_preferences.get("transit_priority"):
-        component_scores.append((compute_transit_score(listing), w_transit))
+        if gm_enriched and location_ctx.get("transit_score") is not None:
+            transit_s = float(location_ctx["transit_score"])
+        else:
+            transit_s = compute_transit_score(listing)
+        component_scores.append((transit_s, w_transit))
 
     if soft_preferences.get("food_scene_priority"):
-        component_scores.append((compute_food_score(listing), w_food))
+        if gm_enriched and location_ctx.get("food_score") is not None:
+            food_s = float(location_ctx["food_score"])
+        else:
+            food_s = compute_food_score(listing)
+        component_scores.append((food_s, w_food))
 
     if not component_scores:
         return None

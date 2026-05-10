@@ -677,6 +677,8 @@ def _enrich_listing(
 
     enriched["location_context"] = {
         "google_maps_enriched": True,
+        "transit_score": round(transit_score, 4),
+        "food_score": round(food_score, 4),
         "nearby_transit_count": len(nearby_transit),
         "nearby_transit_examples": _collect_place_names(nearby_transit),
         "preferred_transit_modes": preferred_transit_modes,
