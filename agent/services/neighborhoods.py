@@ -91,7 +91,7 @@ def _iter_points(coordinates: Any) -> list[tuple[float, float]]:
 def load_neighborhood_centers() -> dict[str, dict[str, Any]]:
     """Load neighborhood centroids from the GeoJSON shipped with the repo."""
 
-    path = Path(PROJECT_ROOT) / "neighbourhoods.geojson"
+    path = Path(PROJECT_ROOT) / "data" / "neighbourhoods.geojson"
     if not path.exists():
         return {}
 

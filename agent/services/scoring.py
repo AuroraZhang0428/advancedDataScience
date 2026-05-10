@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json as _json
 import os
 from difflib import SequenceMatcher
 from typing import Any
@@ -199,7 +200,6 @@ def _candidate_summary(listing: dict[str, Any], topics: list[str] | None = None)
     scoring_weights_used = listing.get("scoring_weights_used", {})
 
     # Parse JSON review array; fall back to plain string for legacy rows
-    import json as _json
     records: list[dict] = []
     try:
         records = _json.loads(raw_sample) if raw_sample else []

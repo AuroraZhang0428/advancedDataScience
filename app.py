@@ -21,6 +21,7 @@ from agent.baselines.filter_search import run_filter_baseline
 from agent.baselines.llm_chatbot import run_llm_chatbot_baseline
 from agent.services.dataset import load_listings
 from agent.services.reviews import detect_topics, get_listing_comments, load_reviews_index
+from agent.services.listing_links import attach_listing_links
 from agent.orchestrator import run_orchestrator
 
 app = Flask(__name__, static_folder="frontend", static_url_path="")
@@ -88,7 +89,6 @@ def _listing_to_dict(listing: dict[str, Any]) -> dict[str, Any]:
         "score_breakdown": {k: float(v) for k, v in score_breakdown.items()},
         "llm_fit_score": listing.get("llm_fit_score"),
         "llm_rank_reason": listing.get("llm_rank_reason"),
-        "deterministic_score": listing.get("deterministic_score"),
         "latitude": listing.get("latitude"),
         "longitude": listing.get("longitude"),
     }
@@ -234,11 +234,6 @@ def _apply_user_answer(state: dict[str, Any], question_key: str | None, answer: 
             pct = float(relaxable.get("max_price", {}).get("suggested_increase_pct", 0.10))
             hard["max_price"] = round(float(current) * (1 + pct), 2)
 
-    elif question_key == "target_price":
-        current = soft.get("target_price")
-        if current is not None:
-            soft["target_price"] = round(float(current) * 1.5, 2)
-
     state["hard_constraints"] = hard
     state["soft_preferences"] = soft
     return state
@@ -264,11 +259,18 @@ def _build_response(result: dict[str, Any], user_query: str = "") -> dict[str, A
     _ensure_reviews_loaded()
     topics = detect_topics(user_query, result.get("soft_preferences", {}))
 
+    # _listing_to_dict produces a clean copy with only display fields —
+    # the original scored listing dicts (used for ranking) are never touched
+    # from this point on. airbnb_url is added only to these display copies.
     recommendations = []
     for r in result.get("final_recommendations", []):
         rec = _listing_to_dict(r)
         rec["comments"] = get_listing_comments(str(rec["id"]), _reviews_index, topics)
         recommendations.append(rec)
+
+    # Link lookup runs after ranking is fully frozen and operates only on the
+    # display-copy dicts above. It cannot influence scores or ordering.
+    attach_listing_links(recommendations)
     explanations = result.get("final_explanations", [])
     relaxation_history = result.get("relaxation_history", [])
     need_user_input = result.get("need_user_input", False)
@@ -293,9 +295,10 @@ def _build_response(result: dict[str, Any], user_query: str = "") -> dict[str, A
             "created_at": datetime.utcnow(),
         }
         response["session_id"] = session_id
-        # Surface the question_key so the frontend can label the answer correctly
-        question_key = (result.get("latest_decision") or {}).get("change", {}).get("question_key")
-        response["question_key"] = question_key
+        # question_key is set directly in state by _ask_user when the question
+        # is about a specific constraint (max_price, min_bedrooms) so the
+        # frontend shows yes/no buttons and the backend knows which constraint to update.
+        response["question_key"] = result.get("question_key")
 
     return response
 
