@@ -445,20 +445,27 @@ def compute_neighborhood_score(listing: dict[str, Any], soft_preferences: dict[s
             best = max(best, 0.65)
         explicit_neighborhood_score = _clip(best)
 
+    # Read LLM-assigned sub-weights; fall back to defaults if not present.
+    sub_w = soft_preferences.get("location_sub_weights") or {}
+    w_neighborhood = float(sub_w.get("neighborhood_match", 0.40))
+    w_commute = float(sub_w.get("commute", 0.30))
+    w_transit = float(sub_w.get("transit", 0.15))
+    w_food = float(sub_w.get("food_scene", 0.15))
+
     component_scores: list[tuple[float, float]] = []
     if explicit_neighborhood_score is not None:
-        component_scores.append((explicit_neighborhood_score, 0.40))
+        component_scores.append((explicit_neighborhood_score, w_neighborhood))
 
     commute_destinations = [str(item) for item in soft_preferences.get("commute_destinations", []) if str(item).strip()]
     commute_score = compute_commute_score(listing, commute_destinations)
     if commute_score is not None:
-        component_scores.append((commute_score, 0.30))
+        component_scores.append((commute_score, w_commute))
 
     if soft_preferences.get("transit_priority"):
-        component_scores.append((compute_transit_score(listing), 0.15))
+        component_scores.append((compute_transit_score(listing), w_transit))
 
     if soft_preferences.get("food_scene_priority"):
-        component_scores.append((compute_food_score(listing), 0.15))
+        component_scores.append((compute_food_score(listing), w_food))
 
     if not component_scores:
         return None
