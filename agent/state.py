@@ -22,11 +22,10 @@ class AgentState(TypedDict, total=False):
     google_enrichment_diagnostics: dict[str, Any]
     sufficient_results: bool
     results_diagnostics: dict[str, Any]
-    attempt_count: int
     relaxation_history: list[dict[str, Any]]
-    latest_decision: dict[str, Any]
     need_user_input: bool
     user_question: str | None
+    question_key: str | None
     questions_asked: list[str]
     final_recommendations: list[dict[str, Any]]
     final_explanations: list[str]

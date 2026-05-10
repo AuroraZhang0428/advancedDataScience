@@ -4,230 +4,312 @@ from __future__ import annotations
 
 from typing import Any
 
+import json as _json
 import os
 try:
     from langchain_openai import ChatOpenAI
-    from langchain_core.prompts import PromptTemplate
 except ImportError:
     ChatOpenAI = None
-    PromptTemplate = None
 
 
-def _require_llm_rewrite() -> None:
-    """Ensure the OpenAI-backed explanation rewrite is available."""
+# ── Review extraction ────────────────────────────────────────────────────────
 
-    if ChatOpenAI is None or PromptTemplate is None:
-        raise RuntimeError("OpenAI-backed explanation rewriting requires langchain_openai and langchain_core.")
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise RuntimeError("OPENAI_API_KEY is required because non-LLM explanation fallback has been removed.")
+def _extract_review_snippets(listing: dict[str, Any], max_recent: int = 2) -> str:
+    """Return a compact block of guest review text for the LLM to read.
 
-
-def _rewrite_with_llm(draft: str) -> str:
-    """Use an LLM to rewrite the deterministic draft."""
-
-    _require_llm_rewrite()
-    
+    Mirrors the user-facing display: up to max_recent non-critical reviews
+    and 1 critical review (if any exist), taken directly from the JSON
+    sample_reviews column so the LLM reads the same reviews the user sees.
+    """
+    raw = (listing.get("raw") or {}).get("sample_reviews", "")
+    if not raw:
+        return ""
     try:
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
-        prompt = PromptTemplate.from_template(
-            "You are an expert real estate and leasing agent.\n"
-            "Rewrite the following deterministic listing description into a polished, natural, "
-            "and persuasive short paragraph.\n"
-            "CRITICAL: You MUST include the exact numerical listing price (e.g., $1,500) and explicit trade-offs.\n"
-            "Maintain all factual information, score breakdowns, and make it sound conversational.\n"
-            "Ensure you clearly emphasize whether the price matches the user's budget and qualitative preference (cheap/expensive).\n\n"
-            "Draft:\n{draft}\n\nPolished Version:"
-        )
-        chain = prompt | llm
-        result = chain.invoke({"draft": draft})
-        return result.content.strip()
-    except Exception as e:
-        raise RuntimeError(f"OpenAI-backed explanation rewriting failed: {e}") from e
+        records = _json.loads(str(raw))
+    except (ValueError, TypeError):
+        return ""
+
+    recent = [r for r in records if not r.get("critical")]
+    critical = [r for r in records if r.get("critical")]
+
+    shown = recent[:max_recent]
+    if critical:
+        shown.append(critical[0])
+
+    if not shown:
+        return ""
+
+    lines = []
+    for r in shown:
+        tag = "[critical]" if r.get("critical") else "[recent]"
+        name = r.get("name", "Guest")
+        text = r.get("text", "").replace("\n", " ").strip()
+        if text:
+            lines.append(f"{tag} {name}: {text}")
+
+    return "\n".join(lines)
 
 
-def _describe_top_strengths(score_breakdown: dict[str, float]) -> list[str]:
-    """Turn the strongest score components into user-facing phrases."""
+# ── Score → plain-language quality label ─────────────────────────────────────
 
+def _quality(score: float) -> str:
+    if score >= 0.80:
+        return "excellent"
+    if score >= 0.65:
+        return "good"
+    if score >= 0.50:
+        return "acceptable"
+    return "weak"
+
+
+# ── Section builders ──────────────────────────────────────────────────────────
+
+def _build_fit_section(
+    listing: dict[str, Any],
+    soft_preferences: dict[str, Any],
+    hard_constraints: dict[str, Any],
+    breakdown: dict[str, float],
+) -> str:
+    """Describe how the listing fits the user's request in plain language."""
+    parts: list[str] = []
+
+    neighborhood = listing.get("neighborhood") or listing.get("neighborhood_group") or "the area"
+    price = listing.get("price")
+    bedrooms = listing.get("bedrooms")
+    bathrooms = listing.get("bathrooms")
+
+    # Location
+    parts.append(f"Located in {neighborhood}.")
+
+    # Price — interpret relative to budget, not as a raw score
+    if price is not None:
+        budget = hard_constraints.get("max_price")
+        target = soft_preferences.get("target_price")
+        price_val = float(price)
+        if target:
+            diff_pct = (price_val - float(target)) / float(target) * 100
+            if abs(diff_pct) <= 5:
+                parts.append(f"Priced at ${price_val:,.0f}/night, right on target.")
+            elif diff_pct < 0:
+                parts.append(f"Priced at ${price_val:,.0f}/night, {abs(diff_pct):.0f}% under the target.")
+            else:
+                parts.append(f"Priced at ${price_val:,.0f}/night, {diff_pct:.0f}% above the target.")
+        elif budget:
+            diff_pct = (price_val - float(budget)) / float(budget) * 100
+            if price_val <= float(budget):
+                parts.append(f"Priced at ${price_val:,.0f}/night, within the ${float(budget):,.0f} budget.")
+            else:
+                parts.append(f"Priced at ${price_val:,.0f}/night, {diff_pct:.0f}% over the stated budget.")
+        else:
+            parts.append(f"Priced at ${price_val:,.0f}/night.")
+
+    # Bedrooms / bathrooms
+    room_bits = []
+    if bedrooms is not None:
+        room_bits.append(f"{bedrooms:g} bedroom{'s' if float(bedrooms) != 1 else ''}")
+    if bathrooms is not None:
+        room_bits.append(f"{bathrooms:g} bathroom{'s' if float(bathrooms) != 1 else ''}")
+    if room_bits:
+        parts.append(", ".join(room_bits).capitalize() + ".")
+
+    # Review rating — plain language, no numbers
+    review_q = breakdown.get("review_rating")
+    review_rating = listing.get("review_rating")
+    if review_q is not None:
+        label = _quality(review_q)
+        if review_rating is not None:
+            num = float(review_rating)
+            if num >= 4.8:
+                parts.append("Guests consistently rate this place very highly.")
+            elif num >= 4.5:
+                parts.append("Well-reviewed by past guests.")
+            elif num >= 4.0:
+                parts.append("Generally positive reviews from past guests.")
+            else:
+                parts.append("Reviews are mixed — worth reading them before booking.")
+        else:
+            parts.append(f"Review quality is {label}.")
+
+    # Remote work / quiet
+    if soft_preferences.get("remote_work"):
+        wifi = listing.get("wifi")
+        workspace = listing.get("workspace")
+        signals = []
+        if wifi:
+            signals.append("WiFi confirmed")
+        if workspace:
+            signals.append("dedicated workspace available")
+        if signals:
+            parts.append("Work-friendly: " + ", ".join(signals) + ".")
+        else:
+            parts.append("Remote-work amenities are not explicitly listed for this place.")
+
+    if soft_preferences.get("quiet_preference"):
+        quiet = listing.get("quiet_score")
+        if quiet is not None:
+            if float(quiet) >= 0.7:
+                parts.append("The area is generally quiet.")
+            elif float(quiet) >= 0.5:
+                parts.append("The area has moderate noise levels.")
+            else:
+                parts.append("This is a lively area — may not be the quietest option.")
+
+    # Amenity match
+    amenity_q = breakdown.get("amenity_match")
+    desired = soft_preferences.get("desired_amenities") or []
+    if amenity_q is not None and desired:
+        listing_amenities = {str(a).lower() for a in listing.get("amenities", [])}
+        matched = [a for a in desired if str(a).lower() in listing_amenities]
+        missing = [a for a in desired if str(a).lower() not in listing_amenities]
+        if matched:
+            parts.append("Includes: " + ", ".join(matched) + ".")
+        if missing:
+            parts.append("Missing: " + ", ".join(missing) + ".")
+
+    # Location context (Google Maps)
+    loc = dict(listing.get("location_context") or {})
+    if loc.get("google_maps_enriched"):
+        loc_bits = []
+        subway = loc.get("nearby_subway_count")
+        train = loc.get("nearby_train_count")
+        bus = loc.get("nearby_bus_count")
+        food = loc.get("nearby_food_count")
+        grocery = loc.get("nearby_grocery_count")
+        commute = loc.get("average_commute_minutes")
+        if subway:
+            loc_bits.append(f"{int(subway)} subway stop{'s' if subway != 1 else ''} nearby")
+        if train:
+            loc_bits.append(f"{int(train)} train stop{'s' if train != 1 else ''} nearby")
+        if bus:
+            loc_bits.append(f"{int(bus)} bus stop{'s' if bus != 1 else ''} nearby")
+        if food is not None:
+            loc_bits.append(f"{food} dining options nearby")
+        if grocery is not None:
+            loc_bits.append(f"{grocery} grocery option{'s' if grocery != 1 else ''} nearby")
+        if commute is not None:
+            loc_bits.append(f"average commute around {float(commute):.0f} minutes")
+        if loc_bits:
+            parts.append("Neighborhood snapshot: " + ", ".join(loc_bits) + ".")
+
+        commute_summaries = loc.get("commute_summaries") or []
+        if commute_summaries:
+            parts.append("Commute detail: " + "; ".join(str(s) for s in commute_summaries[:2]) + ".")
+
+    return " ".join(parts)
+
+
+def _build_tradeoff_section(breakdown: dict[str, float]) -> str:
+    """Identify genuine weaknesses and phrase them honestly."""
     labels = {
-        "review_rating": "strong review quality",
-        "amenity_match": "amenities that line up well with the request",
-        "purpose_alignment": "a good fit for how the user wants to use the space",
-        "neighborhood_fit": "strong alignment with the preferred area, commute, and neighborhood lifestyle",
-        "price_score": "excellent price value relative to the budget",
-        "google_maps_fit": "strong live neighborhood context for transit, food, grocery access, and commute",
-        "stage_two_llm_fit": "strong holistic fit after balancing the live neighborhood evidence",
-    }
-    ranked = sorted(score_breakdown.items(), key=lambda item: item[1], reverse=True)
-    return [labels[key] for key, value in ranked if value >= 0.65 and key in labels]
-
-
-def _describe_tradeoffs(score_breakdown: dict[str, float]) -> list[str]:
-    """Turn weaker score components into trade-off phrases."""
-
-    labels = {
-        "review_rating": "review quality is acceptable rather than exceptional",
+        "review_rating": "reviews are not the strongest among the options shown",
         "amenity_match": "some requested amenities may be missing",
-        "purpose_alignment": "remote-work or quiet-work support is not perfect",
-        "neighborhood_fit": "the commute, transit, food scene, or neighborhood fit is weaker than the top choices",
-        "price_score": "the price is less ideal compared to budget or price preference",
-        "google_maps_fit": "the nearby transit, food, grocery access, or live commute picture is weaker than the top choices",
-        "stage_two_llm_fit": "the final holistic balancing step still found stronger overall alternatives",
+        "purpose_alignment": "it may not be perfectly set up for remote work or quiet focus",
+        "neighborhood_fit": "the location or commute is a weaker point compared to other recommendations",
+        "price_score": "the price is not the best fit relative to the stated budget",
+        "google_maps_fit": "transit, food access, or commute came back weaker from live data",
+        "stage_two_llm_fit": "in overall balance it ranked behind the top choices",
     }
-    ranked = sorted(score_breakdown.items(), key=lambda item: item[1])
-    tradeoffs = [labels[key] for key, value in ranked if value < 0.60 and key in labels]
-    
-    if not tradeoffs and ranked:
-        lowest_key, lowest_val = ranked[0]
-        if lowest_val < 0.95 and lowest_key in labels:
-            tradeoffs.append(f"relatively speaking, {labels[lowest_key]}")
-            
-    return tradeoffs
+    weak = [labels[k] for k, v in breakdown.items() if v < 0.55 and k in labels]
+    if not weak:
+        return ""
+    return "One thing to keep in mind: " + "; ".join(weak) + "."
 
+
+def _build_relaxation_section(relaxation_history: list[dict[str, Any]]) -> str:
+    """Surface any search adjustments in plain language."""
+    if not relaxation_history:
+        return ""
+    lines = []
+    for item in relaxation_history:
+        action = str(item.get("action") or "").replace("_", " ")
+        change = item.get("change") or ""
+        reason = item.get("reason") or "to find better results"
+        if change:
+            lines.append(f"The search {action}: {change} — {reason}.")
+        else:
+            lines.append(f"The search was adjusted ({action}) because {reason}.")
+    return " ".join(lines)
+
+
+# ── LLM rewrite ───────────────────────────────────────────────────────────────
+
+def _rewrite_with_llm(
+    fit_section: str,
+    tradeoff_section: str,
+    relaxation_section: str,
+    user_query: str,
+    review_snippets: str = "",
+) -> str:
+    """Use an LLM to turn structured sections into a clean, readable explanation."""
+    if ChatOpenAI is None or not os.environ.get("OPENAI_API_KEY"):
+        parts = [fit_section]
+        if tradeoff_section:
+            parts.append(tradeoff_section)
+        if relaxation_section:
+            parts.append(relaxation_section)
+        return "\n\n".join(parts)
+
+    try:
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.4)
+        prompt = (
+            "You are a straightforward apartment leasing assistant. "
+            "Write a recommendation explanation for an average user — no jargon, no flowery language, no scores or numbers except the price.\n\n"
+            f"The user asked for: {user_query}\n\n"
+            "Use the structured notes below to write 2–4 short paragraphs in this order:\n\n"
+            "  Paragraph 1 (always) — A quick baseline snapshot of the listing. "
+            "Briefly cover: the neighborhood feel, overall guest experience quality (are reviews strong? is it clean and well-kept?), "
+            "and transport access (subway, bus, commute) if that data is available. "
+            "This paragraph should give the user a general sense of the place even if they didn't ask about these things.\n\n"
+            "  Paragraph 2 (always) — How this listing specifically fits what the user asked for. "
+            "Focus on the aspects explicitly mentioned in their query. Be direct and concrete.\n\n"
+            "  Paragraph 3 (only if there are real tradeoffs) — Honest things to be aware of. "
+            "Skip entirely if there are no meaningful concerns.\n\n"
+            "  Paragraph 4 (only if the search was adjusted) — What changed during the search and why, in plain terms. "
+            "Skip entirely if no adjustments were made.\n\n"
+            "Rules:\n"
+            "- Do not mention any scores, percentages, or numeric ratings\n"
+            "- Do not use words like 'holistic', 'curated', 'seamlessly', 'boasts', 'nestled', 'vibrant'\n"
+            "- Keep each paragraph to 2–4 sentences\n"
+            "- The price is the only number you may include\n\n"
+            f"Listing notes:\n{fit_section}\n\n"
+            f"Tradeoff notes:\n{tradeoff_section or 'No significant tradeoffs.'}\n\n"
+            f"Search adjustment notes:\n{relaxation_section or 'No adjustments were made.'}\n\n"
+            + (f"Guest reviews (use these to extract real impressions about cleanliness, host quality, noise, etc.):\n{review_snippets}\n" if review_snippets else "")
+        )
+        result = llm.invoke(prompt)
+        return result.content.strip()
+    except Exception:
+        parts = [fit_section]
+        if tradeoff_section:
+            parts.append(tradeoff_section)
+        if relaxation_section:
+            parts.append(relaxation_section)
+        return "\n\n".join(parts)
+
+
+
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def generate_listing_explanation(
     listing: dict[str, Any],
     hard_constraints: dict[str, Any],
     soft_preferences: dict[str, Any],
     relaxation_history: list[dict[str, Any]],
+    user_query: str = "",
 ) -> str:
-    """Generate a deterministic explanation for a single recommendation."""
-
-    title = listing.get("title") or "This listing"
-    host_name = listing.get("host_name") or listing.get("raw", {}).get("host_name")
-    neighborhood = listing.get("neighborhood") or listing.get("neighborhood_group") or "the searched area"
-    score = float(listing.get("score", 0.0))
+    """Generate a plain-language explanation for a single recommendation."""
     breakdown = {
         key: float(value) for key, value in (listing.get("score_breakdown") or {}).items()
     }
 
-    strengths = _describe_top_strengths(breakdown)
-    tradeoffs = _describe_tradeoffs(breakdown)
-    price = listing.get("price")
-    bedrooms = listing.get("bedrooms")
-    bathrooms = listing.get("bathrooms")
+    fit = _build_fit_section(listing, soft_preferences, hard_constraints, breakdown)
+    tradeoff = _build_tradeoff_section(breakdown)
+    relaxation = _build_relaxation_section(relaxation_history)
+    reviews = _extract_review_snippets(listing)
 
-    facts: list[str] = [f"{title} stands out with an overall score of {score:.2f}."]
-    facts.append(f"It is located in {neighborhood}.")
-    if host_name:
-        facts.append(f"Host: {host_name}.")
-    if price is not None and str(price).strip():
-        facts.append(f"Price: ${float(price):,.0f}")
-
-    detail_bits: list[str] = []
-    if bedrooms is not None:
-        detail_bits.append(f"{bedrooms:g} bedroom")
-    if bathrooms is not None:
-        detail_bits.append(f"{bathrooms:g} bathroom")
-    if price is not None:
-        detail_bits.append(f"priced at ${float(price):,.0f}")
-    if detail_bits:
-        facts.append("Core facts: " + ", ".join(detail_bits) + ".")
-
-    if strengths:
-        facts.append("Why it matches well: " + "; ".join(strengths) + ".")
-    if tradeoffs:
-        facts.append("Main trade-offs: " + "; ".join(tradeoffs) + ".")
-
-    requested_bedrooms = hard_constraints.get("min_bedrooms")
-    requested_bathrooms = hard_constraints.get("min_bathrooms")
-    if requested_bedrooms is not None or requested_bathrooms is not None:
-        constraint_bits: list[str] = []
-        if requested_bedrooms is not None and bedrooms is not None:
-            constraint_bits.append(
-                f"bedroom target {'met' if float(bedrooms) >= float(requested_bedrooms) else 'missed'}"
-            )
-        if requested_bathrooms is not None and bathrooms is not None:
-            constraint_bits.append(
-                f"bathroom target {'met' if float(bathrooms) >= float(requested_bathrooms) else 'missed'}"
-            )
-        if constraint_bits:
-            facts.append("Constraint check: " + ", ".join(constraint_bits) + ".")
-
-    preferred_neighborhoods = soft_preferences.get("preferred_neighborhoods") or []
-    if preferred_neighborhoods:
-        preferred_text = ", ".join(str(area) for area in preferred_neighborhoods)
-        facts.append(f"Preferred areas considered: {preferred_text}.")
-
-    location_context = dict(listing.get("location_context") or {})
-    if location_context.get("google_maps_enriched"):
-        location_facts: list[str] = []
-        transit_count = location_context.get("nearby_transit_count")
-        subway_count = location_context.get("nearby_subway_count")
-        train_count = location_context.get("nearby_train_count")
-        bus_count = location_context.get("nearby_bus_count")
-        food_count = location_context.get("nearby_food_count")
-        grocery_count = location_context.get("nearby_grocery_count")
-        avg_commute = location_context.get("average_commute_minutes")
-        preferred_transit_modes = location_context.get("preferred_transit_modes") or []
-        if preferred_transit_modes:
-            mode_text = ", ".join(str(mode) for mode in preferred_transit_modes)
-            location_facts.append(f"preferred transit focus: {mode_text}")
-        if subway_count:
-            location_facts.append(f"{int(subway_count)} nearby subway stops")
-        if train_count:
-            location_facts.append(f"{int(train_count)} nearby train stops")
-        if bus_count:
-            location_facts.append(f"{int(bus_count)} nearby bus stops")
-        if not any([subway_count, train_count, bus_count]) and transit_count is not None:
-            location_facts.append(f"{transit_count} nearby transit options")
-        if food_count is not None:
-            location_facts.append(f"{food_count} nearby food spots")
-        if grocery_count is not None:
-            location_facts.append(f"{grocery_count} nearby grocery options")
-        if avg_commute is not None:
-            location_facts.append(f"average live commute about {float(avg_commute):.0f} minutes")
-        if location_facts:
-            facts.append("Live Google Maps context: " + ", ".join(location_facts) + ".")
-
-        transit_examples = location_context.get("nearby_transit_examples") or []
-        subway_examples = location_context.get("nearby_subway_examples") or []
-        train_examples = location_context.get("nearby_train_examples") or []
-        bus_examples = location_context.get("nearby_bus_examples") or []
-        food_examples = location_context.get("nearby_food_examples") or []
-        if subway_examples:
-            facts.append("Nearby subway examples: " + ", ".join(str(item) for item in subway_examples[:3]) + ".")
-        if train_examples:
-            facts.append("Nearby train examples: " + ", ".join(str(item) for item in train_examples[:3]) + ".")
-        if bus_examples:
-            facts.append("Nearby bus examples: " + ", ".join(str(item) for item in bus_examples[:3]) + ".")
-        if not any([subway_examples, train_examples, bus_examples]) and transit_examples:
-            facts.append("Nearby transit examples: " + ", ".join(str(item) for item in transit_examples[:3]) + ".")
-        if food_examples:
-            facts.append("Nearby food examples: " + ", ".join(str(item) for item in food_examples[:3]) + ".")
-        commute_summaries = location_context.get("commute_summaries") or []
-        if commute_summaries:
-            facts.append("Detailed commute check: " + "; ".join(str(item) for item in commute_summaries[:3]) + ".")
-
-    if relaxation_history:
-        latest = relaxation_history[-1]
-        facts.append(
-            "Search context: the agent had to adjust preferences by "
-            f"{latest.get('action', 'making a trade-off')} because {latest.get('reason', 'results were limited')}."
-        )
-
-    llm_rank_reason = str(listing.get("llm_rank_reason") or "").strip()
-    if llm_rank_reason:
-        facts.append(f"Final balancing note: {llm_rank_reason}.")
-
-    if breakdown:
-        facts.append(
-            "Score breakdown: "
-            + ", ".join(f"{key}={value:.2f}" for key, value in breakdown.items())
-            + "."
-        )
-
-    if host_name:
-        facts.append(f"Search tip: look up the listing title together with host {host_name} to find the exact Airbnb more easily.")
-
-    # Rewrite the deterministic draft into a more polished narrative using an LLM
-    # only when an API key is available; otherwise return the deterministic draft.
-    draft_explanation = " ".join(facts)
-    if os.environ.get("OPENAI_API_KEY"):
-        try:
-            return _rewrite_with_llm(draft_explanation)
-        except Exception:
-            pass  # fall back to plain deterministic text
-    return draft_explanation
+    return _rewrite_with_llm(fit, tradeoff, relaxation, user_query, review_snippets=reviews)
 
 
 def generate_final_output(
@@ -236,9 +318,9 @@ def generate_final_output(
     soft_preferences: dict[str, Any],
     relaxation_history: list[dict[str, Any]],
     top_k: int,
+    user_query: str = "",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Build final recommendation payloads and explanations."""
-
     recommendations = scored_listings[:top_k]
     explanations = [
         generate_listing_explanation(
@@ -246,6 +328,7 @@ def generate_final_output(
             hard_constraints=hard_constraints,
             soft_preferences=soft_preferences,
             relaxation_history=relaxation_history,
+            user_query=user_query,
         )
         for listing in recommendations
     ]

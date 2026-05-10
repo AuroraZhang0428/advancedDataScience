@@ -149,16 +149,27 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "ask_user",
             "description": (
-                "Pause execution and ask the user a clarifying question. Use sparingly — "
-                "only when the user's explicit decision is needed (e.g., confirming a large "
-                "budget increase or a major trade-off). This ends the current search turn."
+                "Pause and ask the user one focused question. Use ONLY in these situations:\n"
+                "  1. Query is too vague to search (no location/budget/size at all) — omit question_key\n"
+                "  2. Budget needs to increase by more than 15% — use question_key='max_price'\n"
+                "  3. Reducing bedrooms 2BR→1BR (major lifestyle change) — use question_key='min_bedrooms'\n"
+                "  4. Two requirements fundamentally conflict with no good compromise — omit question_key\n"
+                "Do NOT use for small adjustments you can make autonomously. This ends the current search turn."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "question": {
                         "type": "string",
-                        "description": "The question to present to the user.",
+                        "description": "The question to present to the user. Be specific: include the current value and proposed change.",
+                    },
+                    "question_key": {
+                        "type": "string",
+                        "enum": ["max_price", "min_bedrooms"],
+                        "description": (
+                            "Set this when asking about a specific constraint so the system can apply "
+                            "the user's yes/no answer automatically. Omit for open-ended questions."
+                        ),
                     },
                 },
                 "required": ["question"],
@@ -414,6 +425,7 @@ def _enrich_with_location(args: dict, state: dict) -> tuple[str, dict]:
 
 def _ask_user(args: dict, state: dict) -> tuple[str, dict]:
     question = args.get("question", "")
+    question_key = args.get("question_key")  # e.g. "max_price", "min_bedrooms", or None
     questions_asked = list(state.get("questions_asked", []))
     questions_asked.append(question)
     return (
@@ -421,6 +433,7 @@ def _ask_user(args: dict, state: dict) -> tuple[str, dict]:
         {
             "need_user_input": True,
             "user_question": question,
+            "question_key": question_key,   # stored directly in state for app.py to read
             "questions_asked": questions_asked,
         },
     )
@@ -443,6 +456,7 @@ def _finalize_recommendations(args: dict, state: dict) -> tuple[str, dict]:
         soft_preferences=state.get("soft_preferences", {}),
         relaxation_history=state.get("relaxation_history", []),
         top_k=DEFAULT_CONFIG.top_k_recommendations,
+        user_query=state.get("user_query", ""),
     )
     return (
         f"Generated {len(recommendations)} final recommendations with explanations.",

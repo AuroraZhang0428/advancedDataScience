@@ -300,9 +300,7 @@ body {
   background: rgba(255,255,255,.04); border: 1px solid var(--border);
   border-radius: 50px; padding: .2rem .55rem;
 }
-.card-score-arc {
-  position: relative; width: 26px; height: 26px;
-}
+
 .score-circle { width: 26px; height: 26px; display: block; }
 .score-bg { fill: none; stroke: rgba(255,255,255,.07); stroke-width: 3.5; }
 .score-fg { fill: none; stroke-width: 3.5; stroke-linecap: round; }
@@ -409,9 +407,33 @@ body {
 .modal-inner { padding: 2rem 2.25rem 2.25rem; }
 .modal-title { font-family: var(--font-serif); font-size: 1.45rem; margin-bottom: .45rem; line-height: 1.25; }
 .modal-neighborhood { color: var(--text-muted); font-size: .85rem; margin-bottom: 1.25rem; }
+.modal-price-row {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 1.75rem;
+}
 .modal-price {
   font-size: 1.75rem; font-weight: 800; color: var(--green);
-  margin-bottom: 1.75rem; letter-spacing: -.03em;
+  letter-spacing: -.03em;
+}
+.airbnb-link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  font-size: .78rem;
+  font-weight: 600;
+  color: var(--accent-light);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: .3rem .7rem;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: border-color .15s, background .15s;
+}
+.airbnb-link-btn:hover {
+  border-color: var(--accent-light);
+  background: var(--accent-glow);
 }
 .modal-section { margin-bottom: 1.75rem; }
 .modal-section h4 {
@@ -498,6 +520,17 @@ body {
   border-color: var(--border);
 }
 .clarify-no:hover { border-color: var(--text-muted); color: var(--text); }
+.clarify-open-ended { display: flex; flex-direction: column; gap: .75rem; }
+.clarify-textarea {
+  width: 100%; padding: .65rem .9rem;
+  background: rgba(255,255,255,.05);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text); font-family: var(--font); font-size: .88rem;
+  resize: vertical; min-height: 3rem;
+  transition: border-color .15s;
+}
+.clarify-textarea:focus { outline: none; border-color: var(--accent); }
 
 /* ─── Responsive ─── */
 

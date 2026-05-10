@@ -31,6 +31,7 @@
   const errorToast = $("errorToast");
   const errorMessage = $("errorMessage");
   const modalOverlay = $("modalOverlay");
+  const modalContent = $("modalContent");
   const compareBtn = $("compareBtn");
   const comparisonSection = $("comparisonSection");
 
@@ -322,10 +323,15 @@
     cardsGrid.innerHTML = "";
 
     // ── Clarification card (inline, above results) ──────────────────────────
-    if (data.need_user_input && data.user_question && data.session_id) {
-      cardsGrid.appendChild(
-        createClarificationCard(data.user_question, data.session_id, data.question_key)
-      );
+    // Open-ended questions don't need a session_id (they trigger a fresh search).
+    // Constraint tradeoff questions require session_id to resume the pipeline.
+    if (data.need_user_input && data.user_question) {
+      const needsSession = !!data.question_key;
+      if (!needsSession || data.session_id) {
+        cardsGrid.appendChild(
+          createClarificationCard(data.user_question, data.session_id, data.question_key)
+        );
+      }
     }
 
     recs.forEach((rec, idx) => {
@@ -436,23 +442,57 @@
     card.className = "clarification-card";
     card.id = "clarificationCard";
 
-    card.innerHTML = `
-      <div class="clarify-icon">🤔</div>
-      <div class="clarify-body">
-        <div class="clarify-label">Agent Question</div>
-        <p class="clarify-question">${esc(question)}</p>
-        <div class="clarify-actions">
-          <button class="clarify-btn clarify-yes" id="clarifyYes">Yes, sounds good</button>
-          <button class="clarify-btn clarify-no" id="clarifyNo">No, keep searching</button>
-        </div>
-      </div>`;
+    // Open-ended question (no questionKey) → text input so user can describe what they want
+    // Constraint tradeoff (questionKey present) → yes/no buttons
+    const isOpenEnded = !questionKey;
 
-    card.querySelector("#clarifyYes").addEventListener("click", () => {
-      answerClarification(sessionId, questionKey, "yes");
-    });
-    card.querySelector("#clarifyNo").addEventListener("click", () => {
-      answerClarification(sessionId, questionKey, "no");
-    });
+    if (isOpenEnded) {
+      card.innerHTML = `
+        <div class="clarify-icon">🤔</div>
+        <div class="clarify-body">
+          <div class="clarify-label">Let's narrow it down</div>
+          <p class="clarify-question">${esc(question)}</p>
+          <div class="clarify-open-ended">
+            <textarea class="clarify-textarea" id="clarifyInput" rows="2"
+              placeholder="e.g. 2-bed in Brooklyn under $150/night, need wifi for remote work…"></textarea>
+            <button class="clarify-btn clarify-yes" id="clarifySubmit">Search →</button>
+          </div>
+        </div>`;
+
+      const textarea = card.querySelector("#clarifyInput");
+      const submitBtn = card.querySelector("#clarifySubmit");
+
+      const handleSubmit = () => {
+        const text = textarea.value.trim();
+        if (!text) return;
+        queryInput.value = text;
+        closeModal && closeModal();
+        doSearch();
+      };
+
+      submitBtn.addEventListener("click", handleSubmit);
+      textarea.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); }
+      });
+    } else {
+      card.innerHTML = `
+        <div class="clarify-icon">🤔</div>
+        <div class="clarify-body">
+          <div class="clarify-label">Agent Question</div>
+          <p class="clarify-question">${esc(question)}</p>
+          <div class="clarify-actions">
+            <button class="clarify-btn clarify-yes" id="clarifyYes">Yes, sounds good</button>
+            <button class="clarify-btn clarify-no" id="clarifyNo">No, keep searching</button>
+          </div>
+        </div>`;
+
+      card.querySelector("#clarifyYes").addEventListener("click", () => {
+        answerClarification(sessionId, questionKey, "yes");
+      });
+      card.querySelector("#clarifyNo").addEventListener("click", () => {
+        answerClarification(sessionId, questionKey, "no");
+      });
+    }
 
     return card;
   }
@@ -574,7 +614,10 @@
         </div>
         <h2 class="modal-title">${esc(rec.title)}</h2>
         <p class="modal-neighborhood">📍 ${esc(rec.neighborhood)}${rec.neighborhood_group ? " · " + esc(rec.neighborhood_group) : ""}</p>
-        <div class="modal-price">${priceText}<span style="font-size:.85rem;color:var(--text-dim);font-weight:400"> /night</span></div>
+        <div class="modal-price-row">
+          <div class="modal-price">${priceText}<span style="font-size:.85rem;color:var(--text-dim);font-weight:400"> /night</span></div>
+          ${rec.airbnb_url ? `<a class="airbnb-link-btn" href="${rec.airbnb_url}" target="_blank" rel="noopener">View on Airbnb ↗</a>` : ""}
+        </div>
 
         ${mapHTML}
 
@@ -650,11 +693,19 @@
       : "";
 
     const hasCriticalShown = comments.shown.some((c) => c.critical);
-    const selectionNote = `<p class="review-selection-note">${
-      hasTopics
-        ? `Showing 2 reviews most relevant to your query${hasCriticalShown ? " · 1 critical review pinned" : ""}`
-        : `Showing 2 most recent reviews${hasCriticalShown ? " · 1 critical review pinned" : ""}`
-    }</p>`;
+    const nonCriticalShown = comments.shown.filter((c) => !c.critical).length;
+    let selectionNoteText;
+    if (hasCriticalShown) {
+      selectionNoteText = hasTopics
+        ? `Showing ${nonCriticalShown} review${nonCriticalShown !== 1 ? "s" : ""} most relevant to your query · 1 critical review pinned`
+        : `Showing ${nonCriticalShown} most recent review${nonCriticalShown !== 1 ? "s" : ""} · 1 critical review pinned`;
+    } else {
+      const total = comments.shown.length;
+      selectionNoteText = hasTopics
+        ? `Showing ${total} review${total !== 1 ? "s" : ""} most relevant to your query`
+        : `Showing ${total} most recent review${total !== 1 ? "s" : ""}`;
+    }
+    const selectionNote = `<p class="review-selection-note">${selectionNoteText}</p>`;
 
     // Paginated "more" section — render all reviews pre-grouped in batches
     let moreSection = "";
