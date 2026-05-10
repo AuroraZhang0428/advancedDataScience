@@ -17,6 +17,13 @@ class PreferenceWeights(BaseModel):
     price_score: float = Field(default=0.2, description="Relative importance of price fit from 0.0 to 1.0.")
 
 
+class LocationSubWeights(BaseModel):
+    neighborhood_match: float = Field(default=0.40, description="Importance of matching a specific requested neighborhood or area.")
+    commute: float = Field(default=0.30, description="Importance of proximity to commute destinations or workplaces.")
+    transit: float = Field(default=0.15, description="Importance of general public transit access in the area.")
+    food_scene: float = Field(default=0.15, description="Importance of nearby restaurants, cafes, and food access.")
+
+
 class ApartmentPreferences(BaseModel):
     min_guests: int | None = Field(default=None, description="Minimum number of guests the listing should accommodate")
     min_bedrooms: int | None = Field(default=None, description="Minimum number of bedrooms")
@@ -66,6 +73,10 @@ class ApartmentPreferences(BaseModel):
         default_factory=PreferenceWeights,
         description="Weighting of review, amenities, purpose, neighborhood, and price based on the user's priorities.",
     )
+    location_sub_weights: LocationSubWeights = Field(
+        default_factory=LocationSubWeights,
+        description="How to split importance within the neighborhood_fit component across neighborhood match, commute, transit, and food scene.",
+    )
 
 
 _PARSE_PROMPT = """\
@@ -104,6 +115,16 @@ Examples:
  - If the user emphasizes specific amenities, increase amenity_match.
  - If the user emphasizes ratings or trust, increase review_rating.
 
+CRITICAL INSTRUCTION FOR LOCATION SUB-WEIGHTS:
+Set location_sub_weights to reflect how the user prioritises the four location dimensions within neighborhood_fit.
+Defaults are neighborhood_match=0.40, commute=0.30, transit=0.15, food_scene=0.15. Adjust when there is clear emphasis:
+ - "transit is the most important thing", "I rely on the subway" → raise transit (e.g. 0.40), lower others.
+ - "I need to commute to X every day, that's the main concern" → raise commute (e.g. 0.50), lower others.
+ - "I specifically want to be in the West Village, nothing else" → raise neighborhood_match (e.g. 0.60), lower others.
+ - "great food scene and restaurants matter most" → raise food_scene (e.g. 0.40), lower others.
+ - When multiple signals co-occur (e.g. transit AND specific neighborhood), balance the weights proportionally to the relative emphasis in the query.
+ - Weights do not need to sum to 1; the code normalises them.
+
 FOOD PREFERENCE INSTRUCTIONS:
  - If the user mentions liking a cuisine or food type (e.g. "I love sushi", "lots of Italian places", "good coffee"), add it to preferred_cuisines.
  - If the user mentions disliking or avoiding a food type (e.g. "no fast food", "hate chains", "avoid McDonald's"), add it to avoided_cuisines.
@@ -116,6 +137,27 @@ COMMUTE, TRANSIT, AND LIFESTYLE INSTRUCTIONS:
  - If the user cares about restaurants, cafes, grocery access, dining, or the local food scene, set food_scene_priority to true.
  - Neighborhood intent is broader than exact neighborhood names; capture both literal area preferences and commute/lifestyle needs.
 """
+
+
+def _normalize_location_sub_weights(location_sub_weights: dict[str, Any] | None) -> dict[str, float]:
+    """Normalize location sub-weights so they sum to 1.0."""
+    default = {"neighborhood_match": 0.40, "commute": 0.30, "transit": 0.15, "food_scene": 0.15}
+    if not location_sub_weights:
+        return default
+
+    cleaned: dict[str, float] = {}
+    total = 0.0
+    for key in default:
+        try:
+            val = max(float(location_sub_weights.get(key, default[key])), 0.0)
+        except (TypeError, ValueError):
+            val = default[key]
+        cleaned[key] = val
+        total += val
+
+    if total <= 0:
+        return default
+    return {k: round(v / total, 4) for k, v in cleaned.items()}
 
 
 def _normalize_priority_weights(priority_weights: dict[str, Any] | None) -> dict[str, float]:
@@ -161,8 +203,10 @@ def _build_preferences_dict(
     preferred_cuisines: list[str] | None = None,
     avoided_cuisines: list[str] | None = None,
     priority_weights: dict[str, float] | None = None,
+    location_sub_weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     normalized_weights = _normalize_priority_weights(priority_weights)
+    normalized_location_sub_weights = _normalize_location_sub_weights(location_sub_weights)
     preferred_cuisines = preferred_cuisines or []
     avoided_cuisines = avoided_cuisines or []
 
@@ -213,6 +257,7 @@ def _build_preferences_dict(
         "price_floor": price_floor,
         "target_price": target_price,
         "priority_weights": normalized_weights,
+        "location_sub_weights": normalized_location_sub_weights,
         "amenity_strictness": 1.0,
         "expanded_neighborhood_search": False,
         "preferred_cuisines": preferred_cuisines,
@@ -254,6 +299,11 @@ def parse_preferences(user_query: str) -> dict[str, Any]:
             if hasattr(result.priority_weights, "model_dump")
             else result.priority_weights.dict()
         )
+        location_sub_weights = (
+            result.location_sub_weights.model_dump()
+            if hasattr(result.location_sub_weights, "model_dump")
+            else result.location_sub_weights.dict()
+        )
 
         return _build_preferences_dict(
             min_guests=result.min_guests,
@@ -277,6 +327,7 @@ def parse_preferences(user_query: str) -> dict[str, Any]:
             preferred_cuisines=result.preferred_cuisines,
             avoided_cuisines=result.avoided_cuisines,
             priority_weights=priority_weights,
+            location_sub_weights=location_sub_weights,
         )
     except Exception as exc:
         raise RuntimeError(f"Preference parsing failed: {exc}") from exc
