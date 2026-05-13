@@ -6,6 +6,7 @@ from typing import Any
 
 import json as _json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
     from langchain_openai import ChatOpenAI
 except ImportError:
@@ -357,14 +358,20 @@ def generate_final_output(
         rec["relaxation_tags"] = relaxation_tags
         recommendations.append(rec)
 
-    explanations = [
-        generate_listing_explanation(
-            listing,
-            hard_constraints=hard_constraints,
-            soft_preferences=soft_preferences,
-            relaxation_history=relaxation_history,
-            user_query=user_query,
-        )
-        for listing in recommendations
-    ]
+    # Generate explanations in parallel — each is an independent LLM call.
+    explanations: list[str] = [""] * len(recommendations)
+    with ThreadPoolExecutor(max_workers=len(recommendations)) as executor:
+        futures = {
+            executor.submit(
+                generate_listing_explanation,
+                listing,
+                hard_constraints,
+                soft_preferences,
+                relaxation_history,
+                user_query,
+            ): i
+            for i, listing in enumerate(recommendations)
+        }
+        for future in as_completed(futures):
+            explanations[futures[future]] = future.result()
     return recommendations, explanations
