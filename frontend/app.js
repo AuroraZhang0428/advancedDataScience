@@ -755,6 +755,7 @@
     };
     for (const [k, v] of Object.entries(bd)) {
       const pct = Math.round(v * 100);
+      if (pct < 80) continue;
       const color = v >= 0.7 ? "var(--green)" : v >= 0.5 ? "var(--amber)" : "var(--red)";
       breakdownHTML += `
         <div class="breakdown-item">
@@ -809,7 +810,7 @@
 
         ${mapHTML}
 
-        ${explanation ? `<div class="modal-section"><h4>AI Explanation</h4><div class="modal-explanation">${esc(explanation)}</div></div>` : ""}
+        ${explanation ? `<div class="modal-section"><h4>AI Explanation</h4><div class="modal-explanation">${formatExplanation(explanation)}</div></div>` : ""}
 
         ${buildRelaxationSectionHTML(rec.relaxation_tags)}
 
@@ -974,5 +975,20 @@
     const d = document.createElement("div");
     d.textContent = String(s);
     return d.innerHTML;
+  }
+
+  function formatExplanation(s) {
+    if (s == null) return "";
+    return s.split("\n").map(line => {
+      const trimmed = line.trim();
+      if (!trimmed) return "";
+      const heading = trimmed.replace(/^\*\*(.*)\*\*$/, "<strong>$1</strong>");
+      if (heading !== trimmed) return `<div class="expl-heading">${heading}</div>`;
+      if (/^[\u2022\-]/.test(trimmed)) {
+        const text = esc(trimmed.replace(/^[\u2022\-]\s*/, ""));
+        return `<div class="expl-bullet">\u2022 ${text}</div>`;
+      }
+      return `<div class="expl-line">${esc(trimmed)}</div>`;
+    }).join("");
   }
 })();
