@@ -311,8 +311,9 @@ def _candidate_summary(listing: dict[str, Any], topics: list[str] | None = None)
     # This differs slightly from the 2-recent+1-critical display layout, which
     # is fine — scoring needs to be comprehensive, display needs to be readable.
     _SCORING_LIMIT = 10
+    MAX_CRITICAL = 5
     recent = [r for r in records if not r.get("critical")]
-    critical_recs = [r for r in records if r.get("critical")]
+    critical_recs = [r for r in records if r.get("critical")][:MAX_CRITICAL]
 
     if topics and recent:
         recent = sorted(
