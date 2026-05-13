@@ -80,7 +80,7 @@ python app.py
 
 | Key | Purpose |
 |---|---|
-| `OPENAI_API_KEY` | Query parsing, reasoning, and explanation generation |
+| `OPENAI_API_KEY` | Query parsing, reasoning, ranking, and explanation generation |
 
 You must create a `.env` file in the root directory of the project and add your key:
 
@@ -101,7 +101,7 @@ python app.py
 |---|---|
 | `GOOGLE_MAPS_API_KEY` | Live transit, food scene, and commute enrichment |
 
-The agent will use the `enrich_with_location` tool automatically when this key is available.
+When this key is set, the agent can call `enrich_with_location` to fetch real-time neighborhood data (nearby subway stops, restaurants, grocery stores, and actual commute times) and use it for a second-stage reranking of the shortlist.
 
 ---
 
@@ -112,9 +112,11 @@ The agent will use the `enrich_with_location` tool automatically when this key i
    - *"2-bedroom with WiFi and good reviews in Brooklyn under $200/night"*
    - *"Quiet remote-work apartment near a subway station in Manhattan"*
    - *"Affordable private room in Williamsburg"*
-3. Click **Search** — the agent will reason through the results and adapt if needed (~5–10 seconds)
-4. Click any result card to see the full score breakdown, an AI explanation, and an interactive **Google Maps** embed of the location.
-5. Click the **⚡ Compare Methods** button at the top right to learn how NestAI compares against basic filter searches and standard LLM chatbots. After a search, click **⚖️ Compare Baselines** to see the results side-by-side.
+3. Click **Search** — the agent reasons through results and adapts if needed (typically 60–90 seconds depending on query complexity and whether Google Maps enrichment is triggered)
+4. Click any result card to see the full score breakdown, an AI-generated explanation, and an interactive **Google Maps** embed of the location
+5. If any of your requirements were adjusted during the search (e.g. a neighborhood was expanded or a preference relaxed), the card and detail panel will show exactly what changed and why — **hard requirement changes** are flagged separately from **soft preference adjustments**
+6. If the agent needs a decision only you can make (e.g. your budget is too low for the area), it will pause and ask you a yes/no question before resuming the search
+7. Click the **⚡ Compare Methods** button at the top right to see how NestAI compares against basic filter searches and standard LLM chatbots. After a search, click **⚖️ Compare Baselines** to see results side-by-side
 
 ---
 
@@ -122,12 +124,13 @@ The agent will use the `enrich_with_location` tool automatically when this key i
 
 NestAI uses a **ReAct (Reason + Act)** architecture. Instead of a fixed pipeline, the LLM orchestrator decides which tools to call and in what order, observes the results, and adapts its strategy based on what it finds.
 
-### Agent loop
+### Pipeline
 
 ```text
 User query
-  → parse_preferences    (LLM structured output → hard constraints + soft preferences)
-  → orchestrate          (ReAct loop)
+  → Node 1: load_data        (load and normalise the CSV dataset — runs once at startup)
+  → Node 2: parse_preferences (one GPT call → structured hard constraints + soft preferences)
+  → Node 3: orchestrate       (ReAct loop)
        LLM reasons → calls a tool → observes result → reasons again → ...
        until: finalize_recommendations  or  ask_user
   → return results
@@ -137,16 +140,44 @@ User query
 
 | Tool | What it does |
 |---|---|
-| `filter_listings` | Apply hard constraints, report how many listings match |
-| `score_and_rank` | Score filtered listings, report quality assessment |
+| `filter_listings` | Apply hard constraints; report how many listings match |
+| `score_and_rank` | Score filtered listings against soft preferences; report quality assessment |
 | `check_price_range` | Inspect price distribution before adjusting budget |
 | `adjust_constraint` | Relax a hard constraint (price, bedrooms, bathrooms) |
-| `adjust_preference` | Shift a soft preference (neighborhoods, amenities, rating) |
+| `adjust_preference` | Shift a soft preference (neighborhoods, amenities, review rating) |
 | `enrich_with_location` | Add live transit / food / commute data via Google Maps |
 | `ask_user` | Pause and ask the user a clarifying question |
-| `finalize_recommendations` | Generate polished explanations and end the search |
+| `finalize_recommendations` | Generate explanations and end the search |
 
-The agent adapts autonomously — for example, if no listings match it will `check_price_range` to understand the market before deciding whether to raise the budget or ask the user, rather than blindly inflating the price.
+### Decision ladder
+
+When results are insufficient, the agent follows a strict priority order before escalating to the user:
+
+1. **Relax soft preferences autonomously** — identifies the weakest scoring component across the top results and relaxes that preference first (expand neighborhoods, lower amenity strictness, or lower the minimum review rating). Each relaxation has a floor to prevent over-relaxation, and step sizes shrink as the floor approaches.
+2. **Relax hard constraints** — only if the filtered pool is too thin (fewer than 5 listings) after soft relaxation. Checks market prices before raising the budget; reduces bedroom count autonomously only for 3BR+.
+3. **Ask the user** — only when the decision genuinely requires human input (e.g. budget needs a >15% increase, or reducing from 2BR to 1BR).
+
+### Scoring
+
+Each listing is scored across five components:
+
+| Component | What it measures |
+|---|---|
+| `review_rating` | Guest rating quality, weighted by review volume |
+| `amenity_match` | How well listing amenities match requested ones |
+| `purpose_alignment` | Fit for remote work and/or quiet preference |
+| `neighborhood_fit` | Neighborhood name match, commute proximity, transit, food scene |
+| `price_score` | Price fit relative to budget, target, or qualitative preference |
+
+**Purpose alignment** uses a 30/70 blend: 30% from listing structural fields (wifi column, workspace column, quiet score) and 70% from guest review signals — keyword matching across review text for wifi quality, workspace quality, and noise level. Reviews are treated as ground truth over listing claims.
+
+After deterministic scoring, a **stage-1 LLM reranker** refines the order using full listing details and reviews. If `enrich_with_location` is called, a **stage-2 LLM reranker** re-orders the shortlist using the live Google Maps neighborhood data.
+
+### Session / resume flow
+
+When the agent calls `ask_user`, the full search state is saved server-side with a UUID session token (30-minute TTL). The frontend shows the question with Yes / No buttons. When the user answers:
+- **Yes** — the proposed constraint change is applied, and the ReAct loop resumes from where it paused
+- **No** — the question is marked as declined, and the agent must find a different path (different relaxation or finalize with current results)
 
 ---
 
@@ -161,9 +192,9 @@ The LLM parser extracts:
 - Requested amenities (WiFi, workspace, gym, laundry, parking, etc.)
 - Work / school / commute destinations
 - Transit priority and preferred modes (subway, train, bus)
-- Food-scene priority
+- Food-scene priority and cuisine preferences
 - Remote-work and quiet preferences
-- Review quality expectations
+- Review quality expectations (hard floors vs soft targets treated differently)
 - Query-specific priority weights for ranking
 
 ---
@@ -172,12 +203,12 @@ The LLM parser extracts:
 
 ```text
 advancedDataScience/
-├── app.py                          Flask API server + frontend serving
+├── app.py                          Flask API server + frontend serving + session management
 ├── requirements.txt
-├── matched_subset_dataset.csv      NYC Airbnb listings dataset
+├── matched_subset_dataset.csv      NYC Airbnb listings dataset (Inside Airbnb)
 ├── frontend/
 │   ├── index.html                  Web UI
-│   ├── app.js                      Search logic and card rendering
+│   ├── app.js                      Search logic, card rendering, relaxation badges
 │   └── style.css                   UI styles
 └── agent/
     ├── config.py                   Scoring weights and thresholds
@@ -192,12 +223,13 @@ advancedDataScience/
     │   ├── parse_preferences.py    Extract structured preferences from query
     │   └── orchestrate.py          LangGraph node wrapping the ReAct loop
     └── services/
-        ├── dataset.py              CSV loading and normalisation
-        ├── parser.py               LLM preference extraction
-        ├── scoring.py              Filtering, scoring, and ranking
-        ├── explanation.py          Recommendation explanation generation
-        ├── google_maps.py          Live neighbourhood enrichment
-        └── neighborhoods.py        Neighbourhood scoring helpers
+        ├── dataset.py              CSV loading and normalisation helpers
+        ├── parser.py               LLM preference extraction (structured output)
+        ├── scoring.py              Filtering, scoring, and two-stage ranking
+        ├── explanation.py          Parallel explanation generation per recommendation
+        ├── google_maps.py          Live neighbourhood enrichment (Places + Routes APIs)
+        ├── neighborhoods.py        Static neighbourhood scoring helpers
+        └── listing_links.py        Airbnb URL verification
 ```
 
 ---
@@ -219,3 +251,6 @@ Mac: `source .venv/bin/activate` · Windows: `.venv\Scripts\activate`
 
 **Search returns no results**
 → Try a broader query (remove bedroom count or price limits). The dataset is NYC Airbnb listings — neighbourhood names like Brooklyn, Manhattan, Williamsburg, Chelsea work best. The agent will also try to adapt automatically before giving up.
+
+**Some Airbnb links show a 404 page**
+→ The dataset is a historical snapshot (Inside Airbnb). Listings that existed when the data was collected may have since been removed from Airbnb. This is a known dataset limitation and does not affect the recommendation logic.
