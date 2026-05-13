@@ -45,29 +45,49 @@ Tools:
 
 ── DECISION LADDER (use in order, stop at first action taken) ───────────────
   Step A — Relax soft preferences autonomously (never need user approval):
-    • Weak neighborhood_fit  → adjust_preference: expand preferred_neighborhoods,
-                               or remove the constraint entirely if too restrictive.
-    • Weak amenity_match     → adjust_preference: lower amenity_strictness to 0.5.
-    • Weak review_rating     → adjust_preference: lower review_min_rating by 0.3–0.5.
+    Identify the weakest scoring component across the top results and relax that
+    preference. Do NOT follow a fixed order — always relax the weakest component first.
+    You may relax the same preference multiple times across separate iterations as long
+    as you re-score between each relaxation and have not yet hit the floor.
+
+    • Weak neighborhood_fit  → adjust_preference: expand preferred_neighborhoods by
+                               adding adjacent or similar neighborhoods, or remove the
+                               constraint entirely if the pool remains too thin after expanding.
+
+    • Weak amenity_match     → adjust_preference: lower amenity_strictness.
+                               Floor: never go below 0.75.
+                               Step size: choose a value in [0.05, (current − 0.75) / 2].
+                               This guarantees at least 2 steps before hitting the floor.
+
+    • Weak review_rating     → adjust_preference: lower review_min_rating.
+                               Floor determination (read the original user query carefully):
+                                 - If the user set a HARD FLOOR ("no lower than X", "at least X",
+                                   "minimum X", "must be X"): floor = that value. Do not relax below it.
+                                 - If the user set a TARGET ("around X", "good reviews", "highly rated",
+                                   "decent reviews", or any soft/vague phrasing): floor = target − 0.5.
+                                 - If the user mentioned no specific rating: floor = 4.0.
+                               Step size: choose a value in [0.05, (current − floor) / 2].
+                               This guarantees at least 2 steps before hitting the floor.
 
   Step B — Relax hard constraints when the result pool is too thin:
     WHEN to consider raising max_price:
       • filter_listings returned 0 results — the budget eliminates everything.
-      • filter_listings returned ≤ 3 results AND soft relaxations (Step A) did not
-        help — the pool is too thin to give good recommendations.
+      • filter_listings returned < 5 results AND soft relaxations (Step A) did not
+        help — the pool is too thin to fill the 5 recommendations shown to the user.
     WHEN NOT to raise max_price:
-      • filter_listings returned ≥ 4 results — the budget is adequate; finalizing
-        with ≥ 4 options is always better than asking the user to spend more.
+      • score_and_rank returned SUFFICIENT — results are good enough; finalize immediately.
+      • filter_listings returned ≥ 5 results — the budget is adequate; the pool is large
+        enough to produce good recommendations without touching hard constraints.
       • Weak price_score alone is NOT a reason to raise — those listings are already
         within budget; raising the cap only adds pricier options that score worse.
 
-    If raising max_price is warranted (≤ 3 results after Step A):
+    If raising max_price is warranted (< 5 results after Step A):
         - Call check_price_range to see real market prices for the same constraints.
         - If budget is within 15% of market median → adjust_constraint max_price ≤15%.
         - If budget needs >15% increase → go to Step C (ask user).
-    • ≤ 3 results due to min_bedrooms ≥ 3:
+    • < 5 results due to min_bedrooms ≥ 3:
         → adjust_constraint min_bedrooms by −1 autonomously.
-    • ≤ 3 results due to min_bedrooms = 2:
+    • < 5 results due to min_bedrooms = 2:
         → go to Step C (ask user) — reducing to 1BR is a major lifestyle change.
 
   Step C — ask_user when the decision genuinely belongs to the user:
@@ -85,10 +105,10 @@ Tools:
 ── RULES ────────────────────────────────────────────────────────────────────
   • Never invent a constraint that was not in the original query (e.g. do not add
     min_bedrooms if the user never mentioned bedrooms).
-  • After one soft relaxation (Step A) + re-score: if you now have ≥ 4 results,
+  • After each Step A relaxation + re-score: if score_and_rank returns SUFFICIENT,
     finalize immediately — imperfect results beat asking the user to spend more.
-    If still ≤ 3 results after Step A, you may enter Step B to widen the pool.
-  • Never chain more than one Step A relaxation before checking result count.
+    If still INSUFFICIENT and filter count < 5, you may enter Step B to widen the pool.
+  • Never chain more than one Step A relaxation before re-scoring.
   • ask_user ends the turn. Do not call it unless truly necessary."""
 
 

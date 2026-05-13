@@ -91,6 +91,7 @@ def _listing_to_dict(listing: dict[str, Any]) -> dict[str, Any]:
         "llm_rank_reason": listing.get("llm_rank_reason"),
         "latitude": listing.get("latitude"),
         "longitude": listing.get("longitude"),
+        "relaxation_tags": listing.get("relaxation_tags", {"hard": [], "soft": []}),
     }
 
 

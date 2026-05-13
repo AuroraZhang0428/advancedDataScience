@@ -681,8 +681,65 @@
         <span class="card-footer-action">View Details <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m9 18 6-6-6-6"/></svg></span>
       </div>`;
 
+    // Relaxation badges on card
+    const tags = rec.relaxation_tags || {};
+    const hardTags = tags.hard || [];
+    const softTags = tags.soft || [];
+    if (hardTags.length > 0 || softTags.length > 0) {
+      const badgeRow = document.createElement("div");
+      badgeRow.className = "card-relaxation-row";
+      hardTags.forEach(() => {
+        badgeRow.innerHTML += `<span class="relax-badge relax-badge--hard">⚠ Requirement adjusted</span>`;
+      });
+      softTags.forEach(() => {
+        badgeRow.innerHTML += `<span class="relax-badge relax-badge--soft">~ Preference relaxed</span>`;
+      });
+      el.querySelector(".card-body").appendChild(badgeRow);
+    }
+
     el.addEventListener("click", () => openModal(rec, idx, explanation));
     return el;
+  }
+
+  /* ── Relaxation Section ── */
+  function buildRelaxationSectionHTML(tags) {
+    if (!tags) return "";
+    const hard = tags.hard || [];
+    const soft = tags.soft || [];
+    if (hard.length === 0 && soft.length === 0) return "";
+
+    let html = `<div class="modal-section modal-relaxation-section">
+      <h4>🔄 Search Adjustments</h4>
+      <p class="relaxation-intro">The original search criteria were adjusted to find these results. Here's what changed and why:</p>`;
+
+    if (hard.length > 0) {
+      html += `<div class="relaxation-group">
+        <div class="relaxation-group-label relaxation-group-label--hard">⚠ Hard Requirement Changes</div>
+        <p class="relaxation-group-desc">These were explicit requirements you set that had to be modified to find results.</p>`;
+      hard.forEach(r => {
+        html += `<div class="relaxation-item relaxation-item--hard">
+          <div class="relaxation-change">${esc(r.change)}</div>
+          <div class="relaxation-reason">${esc(r.reason)}</div>
+        </div>`;
+      });
+      html += `</div>`;
+    }
+
+    if (soft.length > 0) {
+      html += `<div class="relaxation-group">
+        <div class="relaxation-group-label relaxation-group-label--soft">~ Soft Preference Adjustments</div>
+        <p class="relaxation-group-desc">These scoring preferences were softened to surface more options.</p>`;
+      soft.forEach(r => {
+        html += `<div class="relaxation-item relaxation-item--soft">
+          <div class="relaxation-change">${esc(r.change)}</div>
+          <div class="relaxation-reason">${esc(r.reason)}</div>
+        </div>`;
+      });
+      html += `</div>`;
+    }
+
+    html += `</div>`;
+    return html;
   }
 
   /* ── Modal ── */
@@ -753,6 +810,8 @@
         ${mapHTML}
 
         ${explanation ? `<div class="modal-section"><h4>AI Explanation</h4><div class="modal-explanation">${esc(explanation)}</div></div>` : ""}
+
+        ${buildRelaxationSectionHTML(rec.relaxation_tags)}
 
         <div class="modal-section">
           <h4>Score Breakdown</h4>

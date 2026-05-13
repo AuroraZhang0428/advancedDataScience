@@ -327,6 +327,50 @@ body {
 .card-price { font-size: 1.25rem; font-weight: 800; color: var(--green); letter-spacing: -.02em; }
 .card-price-label { font-size: .73rem; color: var(--text-dim); font-weight: 400; }
 
+/* Card relaxation badges */
+.card-relaxation-row {
+  display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .55rem;
+}
+.relax-badge {
+  font-size: .65rem; font-weight: 600; letter-spacing: .03em;
+  padding: .18rem .5rem; border-radius: 99px;
+}
+.relax-badge--hard {
+  background: rgba(251,191,36,.12); color: var(--amber);
+  border: 1px solid rgba(251,191,36,.25);
+}
+.relax-badge--soft {
+  background: rgba(96,165,250,.10); color: var(--blue);
+  border: 1px solid rgba(96,165,250,.2);
+}
+
+/* Modal relaxation section */
+.modal-relaxation-section { border-top: 1px solid var(--border); padding-top: 1rem; }
+.relaxation-intro { font-size: .8rem; color: var(--text-muted); margin-bottom: .75rem; }
+.relaxation-group { margin-bottom: .9rem; }
+.relaxation-group-label {
+  font-size: .72rem; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; margin-bottom: .25rem;
+}
+.relaxation-group-label--hard { color: var(--amber); }
+.relaxation-group-label--soft { color: var(--blue); }
+.relaxation-group-desc { font-size: .76rem; color: var(--text-muted); margin-bottom: .5rem; }
+.relaxation-item {
+  padding: .5rem .7rem; border-radius: var(--radius-xs);
+  margin-bottom: .4rem;
+}
+.relaxation-item--hard {
+  background: rgba(251,191,36,.07); border-left: 2px solid var(--amber);
+}
+.relaxation-item--soft {
+  background: rgba(96,165,250,.07); border-left: 2px solid var(--blue);
+}
+.relaxation-change {
+  font-size: .8rem; font-weight: 600; color: var(--text); margin-bottom: .2rem;
+  font-family: 'Fira Code', monospace;
+}
+.relaxation-reason { font-size: .78rem; color: var(--text-muted); }
+
 /* Card footer */
 .card-footer {
   border-top: 1px solid var(--border);

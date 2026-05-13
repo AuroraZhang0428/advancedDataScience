@@ -216,19 +216,41 @@ def _build_tradeoff_section(breakdown: dict[str, float]) -> str:
 
 
 def _build_relaxation_section(relaxation_history: list[dict[str, Any]]) -> str:
-    """Surface any search adjustments in plain language."""
+    """Surface any search adjustments in plain language, split by hard vs soft."""
     if not relaxation_history:
         return ""
+
+    hard = [r for r in relaxation_history if r.get("action") == "relax_hard"]
+    soft = [r for r in relaxation_history if r.get("action") == "relax_soft"]
+
     lines = []
-    for item in relaxation_history:
-        action = str(item.get("action") or "").replace("_", " ")
-        change = item.get("change") or ""
-        reason = item.get("reason") or "to find better results"
-        if change:
-            lines.append(f"The search {action}: {change} — {reason}.")
-        else:
-            lines.append(f"The search was adjusted ({action}) because {reason}.")
-    return " ".join(lines)
+    if hard:
+        lines.append("Hard constraint changes (user requirements that were modified):")
+        for item in hard:
+            change = item.get("change") or ""
+            reason = item.get("reason") or "to find results"
+            lines.append(f"  • {change} — {reason}")
+    if soft:
+        lines.append("Soft preference adjustments (scoring preferences that were relaxed):")
+        for item in soft:
+            change = item.get("change") or ""
+            reason = item.get("reason") or "to find better results"
+            lines.append(f"  • {change} — {reason}")
+
+    return "\n".join(lines)
+
+
+def _build_relaxation_tags(relaxation_history: list[dict[str, Any]]) -> dict[str, list[dict[str, str]]]:
+    """Return structured hard/soft relaxation tags for frontend display."""
+    hard = [
+        {"change": r.get("change", ""), "reason": r.get("reason", "")}
+        for r in relaxation_history if r.get("action") == "relax_hard"
+    ]
+    soft = [
+        {"change": r.get("change", ""), "reason": r.get("reason", "")}
+        for r in relaxation_history if r.get("action") == "relax_soft"
+    ]
+    return {"hard": hard, "soft": soft}
 
 
 # ── LLM rewrite ───────────────────────────────────────────────────────────────
@@ -264,7 +286,13 @@ def _rewrite_with_llm(
             "Focus on the aspects explicitly mentioned in their query. Be direct and concrete.\n\n"
             "  Paragraph 3 (only if there are real tradeoffs) — Honest things to be aware of. "
             "Skip entirely if there are no meaningful concerns.\n\n"
-            "  Paragraph 4 (only if the search was adjusted) — What changed during the search and why, in plain terms. "
+            "  Paragraph 4 (only if the search was adjusted) — What changed during the search and why. "
+            "Clearly distinguish between HARD constraint changes (things the user explicitly required that had to be modified, "
+            "e.g. budget raised, bedroom count reduced) and SOFT preference adjustments (scoring preferences that were relaxed, "
+            "e.g. amenity strictness lowered, neighborhood expanded, review threshold reduced). "
+            "For each change: state what was changed, explain why it was necessary, and be honest about the tradeoff — "
+            "what is the user getting that differs from what they originally asked for? "
+            "Hard constraint changes are more significant and should be highlighted more prominently than soft adjustments. "
             "Skip entirely if no adjustments were made.\n\n"
             "Rules:\n"
             "- Do not mention any scores, percentages, or numeric ratings\n"
@@ -321,7 +349,14 @@ def generate_final_output(
     user_query: str = "",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Build final recommendation payloads and explanations."""
-    recommendations = scored_listings[:top_k]
+    relaxation_tags = _build_relaxation_tags(relaxation_history)
+
+    recommendations = []
+    for listing in scored_listings[:top_k]:
+        rec = dict(listing)
+        rec["relaxation_tags"] = relaxation_tags
+        recommendations.append(rec)
+
     explanations = [
         generate_listing_explanation(
             listing,

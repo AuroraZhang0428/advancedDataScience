@@ -298,8 +298,10 @@ def _score_and_rank(args: dict, state: dict) -> tuple[str, dict]:
             f"${l.get('price', 0):.0f}/night, {l.get('neighborhood', '?')} | {parts}"
         )
 
-    # Hint which component is weakest across the top results so the agent knows what to relax
-    if top5:
+    # Hint which component is weakest — only when INSUFFICIENT so the agent
+    # is never nudged to keep searching after results are already good enough.
+    hint = ""
+    if not sufficient and top5:
         component_keys = ["review_rating", "amenity_match", "purpose_alignment", "neighborhood_fit", "price_score"]
         avg_by_component = {}
         for k in component_keys:
@@ -317,10 +319,6 @@ def _score_and_rank(args: dict, state: dict) -> tuple[str, dict]:
                 hint += "Consider lowering amenity_strictness via adjust_preference."
             elif weakest == "price_score":
                 hint += "Consider checking price range, then adjusting max_price via adjust_constraint."
-        else:
-            hint = ""
-    else:
-        hint = ""
 
     obs = (
         f"Scored {len(ranked)} listings. Quality: {quality_label} "
