@@ -352,7 +352,9 @@ def filter_hard_constraints(
         price = _safe_float(listing.get("price"))
         listing_room_type = str(listing.get("raw", {}).get("room_type") or "")
 
-        if min_guests is not None and (accommodates is None or accommodates < float(min_guests)):
+        # Only apply min_guests when the listing has guest-capacity data.
+        # If accommodates is unknown we cannot say it fails — skip the check.
+        if min_guests is not None and accommodates is not None and accommodates < float(min_guests):
             continue
         if min_bedrooms is not None and (bedrooms is None or bedrooms < float(min_bedrooms)):
             continue

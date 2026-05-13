@@ -50,27 +50,45 @@ Tools:
     • Weak amenity_match     → adjust_preference: lower amenity_strictness to 0.5.
     • Weak review_rating     → adjust_preference: lower review_min_rating by 0.3–0.5.
 
-  Step B — Relax hard constraints autonomously for SMALL changes only:
-    • 0 results OR weak price_score with max_price set:
-        - First call check_price_range to understand the market.
-        - If budget is within 15% of market median → adjust_constraint max_price by ≤15%.
+  Step B — Relax hard constraints when the result pool is too thin:
+    WHEN to consider raising max_price:
+      • filter_listings returned 0 results — the budget eliminates everything.
+      • filter_listings returned ≤ 3 results AND soft relaxations (Step A) did not
+        help — the pool is too thin to give good recommendations.
+    WHEN NOT to raise max_price:
+      • filter_listings returned ≥ 4 results — the budget is adequate; finalizing
+        with ≥ 4 options is always better than asking the user to spend more.
+      • Weak price_score alone is NOT a reason to raise — those listings are already
+        within budget; raising the cap only adds pricier options that score worse.
+
+    If raising max_price is warranted (≤ 3 results after Step A):
+        - Call check_price_range to see real market prices for the same constraints.
+        - If budget is within 15% of market median → adjust_constraint max_price ≤15%.
         - If budget needs >15% increase → go to Step C (ask user).
-    • min_bedrooms causes 0 results AND current value ≥ 3:
+    • ≤ 3 results due to min_bedrooms ≥ 3:
         → adjust_constraint min_bedrooms by −1 autonomously.
-    • min_bedrooms = 2 and reducing to 1 would be needed:
-        → go to Step C (ask user) — this is a major lifestyle change.
+    • ≤ 3 results due to min_bedrooms = 2:
+        → go to Step C (ask user) — reducing to 1BR is a major lifestyle change.
 
   Step C — ask_user when the decision genuinely belongs to the user:
-    • Budget needs to increase by >15%: ask_user with question_key="max_price".
-      Example: "Your budget is $X/night but similar listings in that area cost around $Y.
-      Would you like to extend your budget to $Y?"
-    • Need to reduce from 2BR to 1BR: ask_user with question_key="min_bedrooms".
-      Example: "No 2-bedroom listings match your other requirements. Would you consider a 1-bedroom instead?"
-    • Two requirements fundamentally conflict with no compromise: ask_user (no question_key).
+    • Budget needs to increase by >15% to get ANY results: ask_user with
+      question_key="max_price" AND proposed_value=<exact dollar amount as a number>.
+      CRITICAL: Always include proposed_value — the backend applies it directly when
+      the user says yes. Omitting it causes a tiny fallback increase that will fail.
+      Example: ask_user(question="Your budget is $80/night but private rooms near
+      Williamsburg typically start at $110. Would you like to raise your budget to $110?",
+      question_key="max_price", proposed_value=110)
+    • Need to reduce from 2BR to 1BR: ask_user with question_key="min_bedrooms"
+      AND proposed_value=1.
+    • Two requirements fundamentally conflict with no good compromise: ask_user (no key).
 
 ── RULES ────────────────────────────────────────────────────────────────────
-  • Never invent a constraint that was not in the original query (e.g. do not add min_bedrooms if user never mentioned bedrooms).
-  • After one relaxation + re-score, always finalize — imperfect results beat no results.
+  • Never invent a constraint that was not in the original query (e.g. do not add
+    min_bedrooms if the user never mentioned bedrooms).
+  • After one soft relaxation (Step A) + re-score: if you now have ≥ 4 results,
+    finalize immediately — imperfect results beat asking the user to spend more.
+    If still ≤ 3 results after Step A, you may enter Step B to widen the pool.
+  • Never chain more than one Step A relaxation before checking result count.
   • ask_user ends the turn. Do not call it unless truly necessary."""
 
 
@@ -95,8 +113,16 @@ def _context_message(state: AgentState) -> str:
 
     lines.append(f"\nDataset: {n_listings} listings available.")
 
-    # Surface declined clarifications so the agent knows not to repeat them
-    # and understands it should try a different approach instead.
+    # Surface resolved clarifications (user said YES and constraint is already updated).
+    questions_resolved = state.get("questions_resolved") or []
+    if questions_resolved:
+        lines.append(
+            "\nUser already approved these constraint changes (already applied to hard_constraints above): "
+            + ", ".join(str(q) for q in questions_resolved)
+            + ". Do NOT ask about them again — proceed with the updated values."
+        )
+
+    # Surface declined clarifications so the agent knows not to repeat them.
     questions_asked = state.get("questions_asked") or []
     if questions_asked:
         lines.append(
@@ -108,7 +134,7 @@ def _context_message(state: AgentState) -> str:
     return "\n".join(lines)
 
 
-def run_orchestrator(state: AgentState) -> AgentState:
+def run_orchestrator(state: AgentState, max_iterations: int = _MAX_ITERATIONS) -> AgentState:
     """Run the ReAct loop. Requires OPENAI_API_KEY to be set."""
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -135,7 +161,7 @@ def run_orchestrator(state: AgentState) -> AgentState:
     working.setdefault("need_user_input", False)
     working.setdefault("user_question", None)
 
-    for _ in range(_MAX_ITERATIONS):
+    for _ in range(max_iterations):
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,

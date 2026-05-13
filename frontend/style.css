@@ -662,6 +662,170 @@ body {
   line-height: 1.55;
 }
 
+/* ── Rich trace steps ── */
+.trace-step--rich {
+  flex-direction: column;
+  gap: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+  align-items: stretch;
+}
+
+.trace-header {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .5rem .65rem;
+  cursor: pointer;
+  user-select: none;
+  transition: background .15s;
+}
+.trace-header:hover { background: rgba(255,255,255,.025); }
+
+.trace-badge {
+  font-size: .59rem;
+  font-weight: 800;
+  letter-spacing: .07em;
+  padding: .13rem .38rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+  line-height: 1.5;
+}
+
+.trace-title-group {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: .06rem;
+}
+
+.trace-title {
+  font-size: .8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.trace-summary {
+  font-size: .71rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trace-chevron {
+  font-size: .7rem;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+/* Collapsed by default; toggled by .trace-body--open */
+.trace-body {
+  display: none;
+  flex-direction: column;
+  gap: .45rem;
+  border-top: 1px solid var(--border);
+  padding: .6rem .7rem;
+}
+.trace-body--open { display: flex; }
+
+/* Input args chips */
+.trace-args {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem .4rem;
+}
+.trace-arg {
+  display: inline-flex;
+  gap: .3rem;
+  font-size: .68rem;
+  background: rgba(255,255,255,.045);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: .1rem .38rem;
+}
+.trace-arg-key { color: var(--text-dim); }
+.trace-arg-val { color: var(--text-muted); font-family: monospace; }
+
+/* Full observation text */
+.trace-obs {
+  font-size: .69rem;
+  font-family: 'Consolas', 'Fira Code', monospace;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  padding: .45rem .55rem;
+  background: rgba(0,0,0,.25);
+  border-radius: 5px;
+  line-height: 1.55;
+}
+
+/* Score-and-rank breakdown */
+.trace-score-section {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+}
+.trace-quality { font-size: .74rem; }
+.trace-weakest { font-size: .7rem; color: var(--amber); }
+
+.trace-bars { display: flex; flex-direction: column; gap: .22rem; }
+.trace-bar-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+.trace-bar-label {
+  font-size: .67rem;
+  color: var(--text-dim);
+  width: 68px;
+  flex-shrink: 0;
+}
+.trace-bar-track {
+  flex: 1;
+  height: 5px;
+  background: rgba(255,255,255,.06);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.trace-bar-fill { height: 100%; border-radius: 99px; }
+.trace-bar-val {
+  font-size: .67rem;
+  font-weight: 700;
+  width: 28px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* Constraint / preference adjustment display */
+.trace-adjust {
+  display: flex;
+  flex-direction: column;
+  gap: .18rem;
+}
+.trace-adjust-name {
+  font-size: .67rem;
+  color: var(--text-dim);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.trace-adjust-row {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  font-size: .78rem;
+}
+.trace-adjust-old { color: var(--red); text-decoration: line-through; opacity: .75; }
+.trace-adjust-arrow { color: var(--text-dim); }
+.trace-adjust-new { color: var(--green); font-weight: 600; }
+.trace-adjust-reason { font-size: .69rem; color: var(--text-muted); font-style: italic; }
+
 .prototype-note {
   margin: 0 0 1.3rem;
   padding: .75rem 1rem;

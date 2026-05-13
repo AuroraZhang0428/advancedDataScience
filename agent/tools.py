@@ -171,6 +171,16 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                             "the user's yes/no answer automatically. Omit for open-ended questions."
                         ),
                     },
+                    "proposed_value": {
+                        "description": (
+                            "REQUIRED when question_key is set. "
+                            "The exact numeric value being proposed for the constraint change. "
+                            "For max_price: the specific dollar amount per night (e.g. 110). "
+                            "For min_bedrooms: the proposed bedroom count (e.g. 1). "
+                            "The backend applies this value directly when the user says yes — "
+                            "omitting it forces a much smaller fallback increase that will likely fail."
+                        ),
+                    },
                 },
                 "required": ["question"],
             },
@@ -331,13 +341,38 @@ def _score_and_rank(args: dict, state: dict) -> tuple[str, dict]:
 def _check_price_range(args: dict, state: dict) -> tuple[str, dict]:
     min_beds = int(args.get("min_bedrooms", 0))
     all_listings = state.get("listings", [])
+    hard = state.get("hard_constraints", {})
+    soft = state.get("soft_preferences", {})
 
-    subset = [
-        l for l in all_listings
-        if l.get("bedrooms", 0) >= min_beds and l.get("price") is not None
-    ]
+    # Apply the same non-price hard constraints that filter_listings would use,
+    # so the price distribution reflects what the user can actually access.
+    room_type = hard.get("room_type")
+    review_min = hard.get("review_min_rating") or soft.get("review_min_rating")
+
+    subset = []
+    for l in all_listings:
+        if l.get("price") is None:
+            continue
+        if l.get("bedrooms", 0) < min_beds:
+            continue
+        if room_type and l.get("room_type") != room_type:
+            continue
+        if review_min is not None:
+            try:
+                if float(l.get("review_rating") or 0) < float(review_min):
+                    continue
+            except (TypeError, ValueError):
+                pass
+        subset.append(l)
+
     if not subset:
-        return f"No listings found with ≥{min_beds} bedrooms.", {}
+        # Fall back to all listings if the filtered set is empty (avoid misleading empty result)
+        subset = [l for l in all_listings if l.get("price") is not None and l.get("bedrooms", 0) >= min_beds]
+        if not subset:
+            return f"No listings found with ≥{min_beds} bedrooms.", {}
+        note = " (no room-type/review filter applied — no listings matched those constraints)"
+    else:
+        note = ""
 
     prices = sorted(float(l["price"]) for l in subset)
     n = len(prices)
@@ -346,8 +381,17 @@ def _check_price_range(args: dict, state: dict) -> tuple[str, dict]:
     p50 = prices[n // 2]
     p75 = prices[min(n - 1, int(n * 0.75))]
 
+    constraints_desc = []
+    if room_type:
+        constraints_desc.append(f"room_type={room_type}")
+    if review_min is not None:
+        constraints_desc.append(f"review≥{review_min}")
+    if min_beds:
+        constraints_desc.append(f"≥{min_beds}BR")
+    filter_label = ", ".join(constraints_desc) if constraints_desc else f"≥{min_beds}BR"
+
     return (
-        f"Price distribution for ≥{min_beds}BR listings ({n} total):\n"
+        f"Price distribution for listings matching your current filters ({filter_label}, {n} total){note}:\n"
         f"  Min=${prices[0]:.0f}  P10=${p10:.0f}  P25=${p25:.0f}  "
         f"Median=${p50:.0f}  P75=${p75:.0f}  Max=${prices[-1]:.0f}  (per night)"
     ), {}
@@ -357,6 +401,17 @@ def _adjust_constraint(args: dict, state: dict) -> tuple[str, dict]:
     name = args["constraint"]
     value = args["value"]
     reason = args.get("reason", "")
+
+    # Hard block: never incrementally adjust a constraint the user has already
+    # explicitly approved. The user set the value on purpose — honour it and finalize.
+    questions_resolved = state.get("questions_resolved") or []
+    if name in questions_resolved:
+        current_val = (state.get("hard_constraints") or {}).get(name, "unknown")
+        return (
+            f"BLOCKED: '{name}' was explicitly approved by the user (current: {current_val}). "
+            "Do not change it further. Call score_and_rank then finalize_recommendations.",
+            {},
+        )
 
     hard = dict(state.get("hard_constraints", {}))
     old_value = hard.get(name)
@@ -426,6 +481,20 @@ def _enrich_with_location(args: dict, state: dict) -> tuple[str, dict]:
 def _ask_user(args: dict, state: dict) -> tuple[str, dict]:
     question = args.get("question", "")
     question_key = args.get("question_key")  # e.g. "max_price", "min_bedrooms", or None
+    proposed_value = args.get("proposed_value")  # specific amount being proposed, e.g. 123.0
+
+    # Hard block: never re-ask about a constraint the user already approved.
+    # This prevents the infinite ask→accept→ask loop regardless of what the LLM decides.
+    questions_resolved = state.get("questions_resolved") or []
+    if question_key and question_key in questions_resolved:
+        current_val = (state.get("hard_constraints") or {}).get(question_key, "unknown")
+        return (
+            f"BLOCKED: The user already approved the '{question_key}' change "
+            f"(current value: {current_val}). Do not ask again. "
+            "Call filter_listings then finalize_recommendations with the current constraints.",
+            {},  # no state change — don't set need_user_input
+        )
+
     questions_asked = list(state.get("questions_asked", []))
     questions_asked.append(question)
     return (
@@ -433,7 +502,8 @@ def _ask_user(args: dict, state: dict) -> tuple[str, dict]:
         {
             "need_user_input": True,
             "user_question": question,
-            "question_key": question_key,   # stored directly in state for app.py to read
+            "question_key": question_key,
+            "question_proposed_value": proposed_value,
             "questions_asked": questions_asked,
         },
     )

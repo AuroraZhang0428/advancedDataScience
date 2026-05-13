@@ -25,7 +25,14 @@ class LocationSubWeights(BaseModel):
 
 
 class ApartmentPreferences(BaseModel):
-    min_guests: int | None = Field(default=None, description="Minimum number of guests the listing should accommodate")
+    min_guests: int | None = Field(
+        default=None,
+        description=(
+            "Minimum number of guests the listing must accommodate. "
+            "Set ONLY when the user explicitly states a guest count (e.g. 'for 4 guests', 'fits 6 people'). "
+            "Do NOT infer or default to 1 — leave as null unless the user specifies a number."
+        ),
+    )
     min_bedrooms: int | None = Field(default=None, description="Minimum number of bedrooms")
     min_bathrooms: float | None = Field(default=None, description="Minimum number of bathrooms")
     price_floor: float | None = Field(
@@ -82,8 +89,8 @@ class ApartmentPreferences(BaseModel):
 _PARSE_PROMPT = """\
 Extract user apartment leasing parameters from this query:\n\n{query}\n\n
 CRITICAL INSTRUCTION FOR GUEST CAPACITY:
-If the user mentions how many guests, people, or persons the place should fit, put that into min_guests.
-Examples include 'for 4 guests', 'fits 6 people', or 'accommodates 2'.
+Only set min_guests if the user explicitly states a number of guests or people (e.g. 'for 4 guests', 'fits 6 people', 'accommodates 3').
+Do NOT set min_guests to 1 by default — leave it null unless a specific number is mentioned.
 
 CRITICAL INSTRUCTION FOR PRICE TYPE:
 Distinguish a hard floor, hard ceiling budget, and target price.
@@ -136,6 +143,16 @@ COMMUTE, TRANSIT, AND LIFESTYLE INSTRUCTIONS:
  - Populate preferred_transit_modes when the user specifically prefers subway, train, bus, or PATH train (PATH connects Manhattan to NJ — add "path" when the user mentions PATH, NJ commute, or Jersey City/Hoboken access).
  - If the user cares about restaurants, cafes, grocery access, dining, or the local food scene, set food_scene_priority to true.
  - Neighborhood intent is broader than exact neighborhood names; capture both literal area preferences and commute/lifestyle needs.
+
+CRITICAL INSTRUCTION FOR LOCATION REFERENCES:
+Always populate preferred_neighborhoods whenever the user expresses ANY location intent, even if it is a landmark, attraction, or non-residential area.
+ - "near Times Square" → preferred_neighborhoods: ["times square"]
+ - "close to Central Park" → preferred_neighborhoods: ["central park"]
+ - "near the High Line" → preferred_neighborhoods: ["high line"]
+ - "in the Financial District" → preferred_neighborhoods: ["financial district"]
+ - "near NYU" → preferred_neighborhoods: ["nyu"]
+ - "near Columbia" → preferred_neighborhoods: ["columbia"]
+The scoring pipeline will resolve these to the correct residential neighbourhood. Never leave preferred_neighborhoods empty when the user mentions a location, area, landmark, or neighbourhood they want to be near or in.
 """
 
 

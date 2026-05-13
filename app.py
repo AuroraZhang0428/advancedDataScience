@@ -129,113 +129,192 @@ def _build_detected_preferences(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_agent_trace(result: dict[str, Any]) -> list[dict[str, str]]:
-    """Create a concise, user-facing trace of the agent's workflow."""
-    trace: list[dict[str, str]] = [
+def _build_agent_trace(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build a rich per-step trace from the orchestrator's message history.
+
+    Each step corresponds to one tool call made by the ReAct orchestrator.
+    Returns a list of dicts with keys: tool, step, category, args, observation, detail.
+    Falls back to a simplified human-readable trace if no message history is present.
+    """
+    import json as _json
+
+    TOOL_LABELS: dict[str, str] = {
+        "filter_listings":        "Filtered listings",
+        "score_and_rank":         "Scored & ranked candidates",
+        "check_price_range":      "Checked price distribution",
+        "adjust_constraint":      "Adjusted hard constraint",
+        "adjust_preference":      "Adjusted soft preference",
+        "enrich_with_location":   "Enriched with location data",
+        "ask_user":               "Asked for clarification",
+        "finalize_recommendations": "Finalized recommendations",
+    }
+    TOOL_CATEGORY: dict[str, str] = {
+        "filter_listings":          "search",
+        "score_and_rank":           "score",
+        "check_price_range":        "explore",
+        "adjust_constraint":        "adapt",
+        "adjust_preference":        "adapt",
+        "enrich_with_location":     "enrich",
+        "ask_user":                 "clarify",
+        "finalize_recommendations": "complete",
+    }
+
+    messages: list[dict] = result.get("orchestrator_messages", []) or []
+
+    # Map tool_call_id → observation string (role == "tool" messages)
+    tool_obs: dict[str, str] = {}
+    for msg in messages:
+        if msg.get("role") == "tool":
+            tc_id = msg.get("tool_call_id", "")
+            if tc_id:
+                tool_obs[tc_id] = msg.get("content", "")
+
+    trace: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in (msg.get("tool_calls") or []):
+            fn = tc.get("function", {})
+            tool_name: str = fn.get("name", "unknown")
+            try:
+                args: dict = _json.loads(fn.get("arguments", "{}"))
+            except Exception:
+                args = {}
+            tc_id = tc.get("id", "")
+            observation = tool_obs.get(tc_id, "")
+            # First line of the observation serves as the collapsed summary
+            detail = observation.split("\n")[0].strip() if observation else ""
+            trace.append({
+                "tool":        tool_name,
+                "step":        TOOL_LABELS.get(tool_name, tool_name.replace("_", " ").title()),
+                "category":    TOOL_CATEGORY.get(tool_name, "search"),
+                "args":        args,
+                "observation": observation,
+                "detail":      detail,
+            })
+
+    if trace:
+        return trace
+
+    # ── Fallback: no orchestrator_messages (older state / non-orchestrator path) ──
+    fallback: list[dict[str, Any]] = [
         {
             "step": "Parsed preferences",
             "detail": "Converted the natural-language request into structured search constraints and preferences.",
         }
     ]
-
     filtered_count = len(result.get("filtered_listings", []) or [])
-    if filtered_count:
-        trace.append({
-            "step": "Filtered listings",
-            "detail": f"Applied hard constraints and kept {filtered_count} matching listings.",
-        })
-    else:
-        trace.append({
-            "step": "Filtered listings",
-            "detail": "Applied hard constraints to narrow the dataset.",
-        })
-
+    fallback.append({
+        "step": "Filtered listings",
+        "detail": (
+            f"Applied hard constraints and kept {filtered_count} matching listings."
+            if filtered_count else "Applied hard constraints to narrow the dataset."
+        ),
+    })
     scored_count = len(result.get("scored_listings", []) or result.get("shortlisted_listings", []) or [])
-    if scored_count:
-        trace.append({
-            "step": "Scored and ranked candidates",
-            "detail": f"Ranked {scored_count} candidates using price, location, reviews, amenities, and lifestyle fit.",
-        })
-    else:
-        trace.append({
-            "step": "Scored and ranked candidates",
-            "detail": "Compared remaining listings against the user's soft preferences.",
-        })
-
+    fallback.append({
+        "step": "Scored and ranked candidates",
+        "detail": (
+            f"Ranked {scored_count} candidates using price, location, reviews, amenities, and lifestyle fit."
+            if scored_count else "Compared remaining listings against the user's soft preferences."
+        ),
+    })
     diagnostics = result.get("results_diagnostics", {}) or {}
-    if diagnostics:
-        good_count = diagnostics.get("good_count")
-        if good_count is not None:
-            trace.append({
-                "step": "Checked result quality",
-                "detail": f"The evaluator found {good_count} high-quality matches before finalizing or adapting the search.",
-            })
-        else:
-            trace.append({
-                "step": "Checked result quality",
-                "detail": "The evaluator checked whether the ranked results were strong enough to show.",
-            })
-    else:
-        trace.append({
-            "step": "Checked result quality",
-            "detail": "The agent evaluated whether the results satisfied the search goal.",
-        })
-
+    good_count = diagnostics.get("good_count")
+    fallback.append({
+        "step": "Checked result quality",
+        "detail": (
+            f"The evaluator found {good_count} high-quality matches before finalizing or adapting the search."
+            if good_count is not None else "The agent evaluated whether the results satisfied the search goal."
+        ),
+    })
     for item in result.get("relaxation_history", []) or []:
         action = str(item.get("action") or "Adjusted search").replace("_", " ").title()
         change = item.get("change")
         reason = item.get("reason") or "The agent adapted the search strategy to improve results."
-        detail = f"{change}. {reason}" if change else reason
-        trace.append({"step": action, "detail": detail})
-
+        fallback.append({"step": action, "detail": f"{change}. {reason}" if change else reason})
     if result.get("need_user_input"):
-        trace.append({
+        fallback.append({
             "step": "Asked for clarification",
             "detail": result.get("user_question") or "The agent needs one more user decision before continuing.",
         })
     else:
         final_count = len(result.get("final_recommendations", []) or [])
-        trace.append({
+        fallback.append({
             "step": "Finalized recommendations",
             "detail": f"Generated {final_count} ranked recommendation{'s' if final_count != 1 else ''} with explanations.",
         })
-
-    return trace
+    return fallback
 
 def _apply_user_answer(state: dict[str, Any], question_key: str | None, answer: str) -> dict[str, Any]:
     """Update agent state based on the user's yes/no answer to a clarification question."""
+    import re as _re
+
     state = dict(state)
     is_yes = answer.lower().strip() in {"yes", "y", "ok", "sure", "yeah", "yep", "okay", "sure thing"}
 
-    # Mark question as answered so the relaxation policy won't repeat it
-    questions_asked = list(state.get("questions_asked", []))
-    if question_key and question_key not in questions_asked:
-        questions_asked.append(question_key)
-    state["questions_asked"] = questions_asked
+    # Save question text BEFORE clearing it — needed for the regex fallback below.
+    saved_question_text: str = state.get("user_question") or ""
+
     state["need_user_input"] = False
     state["user_question"] = None
 
     if not is_yes:
-        # User declined — don't update constraints; policy will try next option
+        # User declined — record the constraint key so the orchestrator knows not to
+        # ask again without polluting the context with the full question text.
+        questions_asked = list(state.get("questions_asked", []))
+        if question_key and question_key not in questions_asked:
+            questions_asked.append(question_key)
+        state["questions_asked"] = questions_asked
         return state
 
-    relaxable = state.get("relaxable_constraints", {})
+    # User accepted — replace questions_asked (which contains stale question texts from
+    # the first run) with the resolved key so the resumed orchestrator context says
+    # "already resolved: max_price" rather than "declined: <question text>".
+    state["questions_asked"] = []
+    resolved = list(state.get("questions_resolved", []))
+    if question_key and question_key not in resolved:
+        resolved.append(question_key)
+    state["questions_resolved"] = resolved
+
+    # Apply the proposed constraint change.
     hard = dict(state.get("hard_constraints", {}))
-    soft = dict(state.get("soft_preferences", {}))
 
     if question_key == "min_bedrooms":
+        proposed = state.get("question_proposed_value")
         current = hard.get("min_bedrooms")
-        if current is not None:
+        if proposed is not None:
+            hard["min_bedrooms"] = max(int(float(proposed)), 0)
+        elif current is not None:
             hard["min_bedrooms"] = max(int(float(current)) - 1, 0)
 
     elif question_key == "max_price":
+        proposed = state.get("question_proposed_value")
+
+        # Fallback: the LLM sometimes omits proposed_value even though it cited a specific
+        # dollar amount in the question text.  Parse the LARGEST $ figure mentioned so we
+        # jump straight to the proposed budget instead of inching up ~15% at a time.
+        if proposed is None and saved_question_text:
+            amounts = _re.findall(r"\$(\d+(?:\.\d+)?)", saved_question_text)
+            if amounts:
+                proposed = max(float(a) for a in amounts)
+
         current = hard.get("max_price")
-        if current is not None:
-            pct = float(relaxable.get("max_price", {}).get("suggested_increase_pct", 0.10))
-            hard["max_price"] = round(float(current) * (1 + pct), 2)
+        if proposed is not None:
+            hard["max_price"] = round(float(proposed), 2)
+        elif current is not None:
+            # Last-resort fallback: a 40% jump is enough to matter without being absurd.
+            hard["max_price"] = round(float(current) * 1.40, 2)
 
     state["hard_constraints"] = hard
-    state["soft_preferences"] = soft
+
+    # Flush stale search intermediates so the resumed orchestrator re-runs
+    # filter_listings and score_and_rank with the updated constraints.
+    state["filtered_listings"] = []
+    state["scored_listings"] = []
+    state["shortlisted_listings"] = []
+    state["sufficient_results"] = False
+
     return state
 
 
@@ -244,7 +323,8 @@ def _resume_pipeline(state: dict[str, Any]) -> dict[str, Any]:
 
     The state already has listings + parsed preferences; we just re-invoke
     the ReAct orchestrator so it can re-run tool calls with the updated
-    hard_constraints or soft_preferences.
+    hard_constraints or soft_preferences. The full iteration budget is used
+    so the agent has room to filter → score → optionally adjust → finalize.
     """
     try:
         result = run_orchestrator(state)
@@ -299,6 +379,7 @@ def _build_response(result: dict[str, Any], user_query: str = "") -> dict[str, A
         # is about a specific constraint (max_price, min_bedrooms) so the
         # frontend shows yes/no buttons and the backend knows which constraint to update.
         response["question_key"] = result.get("question_key")
+        response["question_proposed_value"] = result.get("question_proposed_value")
 
     return response
 
@@ -350,6 +431,7 @@ def clarify():
     session_id = data.get("session_id", "").strip()
     answer = data.get("answer", "").strip()
     question_key = data.get("question_key")
+    proposed_value = data.get("proposed_value")
 
     if not session_id:
         return jsonify({"error": "session_id is required."}), 400
@@ -361,6 +443,12 @@ def clarify():
         return jsonify({"error": "Session not found or expired. Please start a new search."}), 404
 
     saved_state = dict(session["state"])
+
+    # If the frontend sends a proposed_value (the exact amount the orchestrator proposed),
+    # store it on the state so _apply_user_answer can use it directly instead of
+    # falling back to a fixed percentage increase.
+    if proposed_value is not None:
+        saved_state["question_proposed_value"] = proposed_value
 
     # Apply the user's answer to update constraints
     updated_state = _apply_user_answer(saved_state, question_key, answer)

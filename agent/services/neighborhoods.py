@@ -190,16 +190,19 @@ def load_neighborhood_centers() -> dict[str, dict[str, Any]]:
     return centers
 
 
+@lru_cache(maxsize=256)
 def resolve_neighborhood_alias(preferred: str) -> str:
     """Resolve a colloquial area name, landmark, or abbreviation to its canonical NYC neighborhood.
 
     Returns the canonical neighborhood name if found in ``NEIGHBORHOOD_ALIASES``,
-    otherwise returns the normalized input unchanged.
+    otherwise returns the normalized input unchanged.  Result is cached so repeated
+    calls across listings (same preferred string) cost a single dict lookup.
     """
     normalized = _normalize(preferred)
     return NEIGHBORHOOD_ALIASES.get(normalized, normalized)
 
 
+@lru_cache(maxsize=256)
 def resolve_place_reference(place: str) -> dict[str, Any] | None:
     """Resolve a commute or school reference to a neighborhood centroid when possible."""
 

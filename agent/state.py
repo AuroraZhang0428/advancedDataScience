@@ -26,7 +26,9 @@ class AgentState(TypedDict, total=False):
     need_user_input: bool
     user_question: str | None
     question_key: str | None
+    question_proposed_value: float | int | None
     questions_asked: list[str]
+    questions_resolved: list[str]
     final_recommendations: list[dict[str, Any]]
     final_explanations: list[str]
     orchestrator_messages: list[dict[str, Any]]

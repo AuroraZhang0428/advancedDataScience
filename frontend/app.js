@@ -54,6 +54,10 @@
     if (!query) return;
     lastBaseQuery = query;
 
+    // Discard any pending clarification card from a previous search so its
+    // yes/no buttons cannot accidentally resume the old session.
+    hideClarificationCard();
+
     setLoading(true);
     resultsSection.style.display = "none";
     hideToast();
@@ -78,7 +82,7 @@
   }
 
   /* ── Clarification flow ── */
-  async function answerClarification(sessionId, questionKey, answer) {
+  async function answerClarification(sessionId, questionKey, answer, proposedValue) {
     setLoading(true);
     // Keep results section visible but show a "Thinking…" state
     statusTitle.textContent = "Agent is rethinking…";
@@ -89,7 +93,7 @@
       const res = await fetch(API + "/api/clarify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, answer, question_key: questionKey }),
+        body: JSON.stringify({ session_id: sessionId, answer, question_key: questionKey, proposed_value: proposedValue }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Clarification failed");
@@ -329,7 +333,7 @@
       const needsSession = !!data.question_key;
       if (!needsSession || data.session_id) {
         cardsGrid.appendChild(
-          createClarificationCard(data.user_question, data.session_id, data.question_key)
+          createClarificationCard(data.user_question, data.session_id, data.question_key, data.question_proposed_value)
         );
       }
     }
@@ -404,6 +408,92 @@
     return items.slice(0, 8);
   }
 
+  /* ── Agent trace helpers ── */
+
+  const TRACE_CATEGORIES = {
+    search:   { bg: "rgba(96,165,250,.13)",  color: "var(--blue)",         label: "FILTER"  },
+    score:    { bg: "rgba(52,211,153,.13)",  color: "var(--green)",        label: "SCORE"   },
+    explore:  { bg: "rgba(251,191,36,.13)",  color: "var(--amber)",        label: "EXPLORE" },
+    adapt:    { bg: "rgba(251,146,60,.13)",  color: "#f97316",             label: "ADAPT"   },
+    enrich:   { bg: "rgba(167,139,250,.13)", color: "var(--accent-light)", label: "ENRICH"  },
+    clarify:  { bg: "rgba(244,114,182,.13)", color: "#f472b6",             label: "CLARIFY" },
+    complete: { bg: "rgba(52,211,153,.13)",  color: "var(--green)",        label: "DONE"    },
+  };
+
+  const SCORE_COMP_LABELS = {
+    review_rating: "Reviews", amenity_match: "Amenities",
+    purpose_alignment: "Purpose", neighborhood_fit: "Location",
+    price_score: "Price", llm_fit: "AI Fit",
+  };
+
+  function buildScoreBarsHTML(obs) {
+    // Parse quality verdict
+    const qualMatch = obs.match(/Quality:\s*(SUFFICIENT|INSUFFICIENT)/);
+    const quality = qualMatch ? qualMatch[1] : null;
+
+    // Parse weakest component
+    const weakMatch = obs.match(/Weakest component:\s*([\w]+)\s*\(avg\s*([\d.]+)\)/);
+
+    // Parse first top result's per-component breakdown after the "|"
+    // e.g. "  1. Title — overall=0.89, $120/night, Manhattan | review_rating=0.95, amenity_match=0.83..."
+    const topLine = obs.match(/\s+1\.\s+.+?\|\s*(.+)/);
+    const compPairs = topLine
+      ? [...topLine[1].matchAll(/([\w]+)=([\d.]+)/g)]
+      : [];
+
+    if (!quality && !weakMatch && !compPairs.length) return "";
+
+    let html = '<div class="trace-score-section">';
+    if (quality) {
+      const qColor = quality === "SUFFICIENT" ? "var(--green)" : "var(--amber)";
+      html += `<div class="trace-quality" style="color:${qColor}">● Quality: <strong>${quality}</strong></div>`;
+    }
+    if (weakMatch) {
+      html += `<div class="trace-weakest">⚠ Weakest: <strong>${weakMatch[1].replace(/_/g," ")}</strong> (avg ${weakMatch[2]})</div>`;
+    }
+    if (compPairs.length) {
+      html += '<div class="trace-bars">';
+      for (const [, name, val] of compPairs) {
+        const pct = Math.round(parseFloat(val) * 100);
+        const color = pct >= 70 ? "var(--green)" : pct >= 50 ? "var(--amber)" : "var(--red)";
+        html += `<div class="trace-bar-row">
+          <span class="trace-bar-label">${esc(SCORE_COMP_LABELS[name] || name)}</span>
+          <div class="trace-bar-track"><div class="trace-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+          <span class="trace-bar-val" style="color:${color}">${pct}%</span>
+        </div>`;
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function buildAdjustHTML(obs) {
+    // "Updated hard constraint 'max_price': 150 → 175. Reason: ..."
+    const m = obs.match(/Updated (?:hard constraint|soft preference) '(.+?)':\s*(.+?)\s*→\s*(.+?)\.\s*Reason:\s*(.+)/s);
+    if (!m) return "";
+    const [, name, oldVal, newVal, reason] = m;
+    return `<div class="trace-adjust">
+      <span class="trace-adjust-name">${esc(name.replace(/_/g," "))}</span>
+      <div class="trace-adjust-row">
+        <span class="trace-adjust-old">${esc(oldVal)}</span>
+        <span class="trace-adjust-arrow">→</span>
+        <span class="trace-adjust-new">${esc(newVal)}</span>
+      </div>
+      <span class="trace-adjust-reason">${esc(reason.trim())}</span>
+    </div>`;
+  }
+
+  function buildArgsHTML(args) {
+    if (!args || !Object.keys(args).length) return "";
+    const pairs = Object.entries(args).map(([k, v]) => {
+      let display = typeof v === "object" ? JSON.stringify(v) : String(v);
+      if (display.length > 72) display = display.slice(0, 69) + "…";
+      return `<span class="trace-arg"><span class="trace-arg-key">${esc(k)}</span><span class="trace-arg-val">${esc(display)}</span></span>`;
+    }).join("");
+    return `<div class="trace-args">${pairs}</div>`;
+  }
+
   function renderAgentTrace(trace) {
     if (!Array.isArray(trace) || !trace.length) {
       agentTracePanel.style.display = "none";
@@ -411,17 +501,58 @@
       return;
     }
 
-    agentTraceList.innerHTML = trace
-      .map((item, idx) => `
-        <div class="trace-step">
+    agentTraceList.innerHTML = trace.map((item, idx) => {
+      // Fallback: simple step/detail object (no tool field)
+      if (!item.tool) {
+        return `<div class="trace-step">
           <div class="trace-number">${idx + 1}</div>
           <div class="trace-copy">
             <strong>${esc(item.step)}</strong>
             <p>${esc(item.detail)}</p>
           </div>
+        </div>`;
+      }
+
+      // Rich step
+      const cat = TRACE_CATEGORIES[item.category] || TRACE_CATEGORIES.search;
+      const obsId = "tobs-" + idx;
+      const hasObs = !!item.observation;
+
+      const extraHTML = item.tool === "score_and_rank"
+        ? buildScoreBarsHTML(item.observation || "")
+        : (item.tool === "adjust_constraint" || item.tool === "adjust_preference")
+          ? buildAdjustHTML(item.observation || "")
+          : "";
+
+      return `<div class="trace-step trace-step--rich" data-obs="${obsId}">
+        <div class="trace-header"${hasObs ? ` onclick="window._toggleTrace('${obsId}')"` : ""}>
+          <div class="trace-number">${idx + 1}</div>
+          <div class="trace-badge" style="background:${cat.bg};color:${cat.color}">${cat.label}</div>
+          <div class="trace-title-group">
+            <strong class="trace-title">${esc(item.step)}</strong>
+            ${item.detail ? `<span class="trace-summary">${esc(item.detail)}</span>` : ""}
+          </div>
+          ${hasObs ? '<div class="trace-chevron">▸</div>' : ""}
         </div>
-      `)
-      .join("");
+        ${hasObs ? `<div class="trace-body" id="${obsId}">
+          ${buildArgsHTML(item.args)}
+          ${extraHTML}
+          <pre class="trace-obs">${esc(item.observation)}</pre>
+        </div>` : ""}
+      </div>`;
+    }).join("");
+
+    // Toggle function scoped to window so inline onclick can reach it
+    window._toggleTrace = function (id) {
+      const body = document.getElementById(id);
+      if (!body) return;
+      const open = body.classList.toggle("trace-body--open");
+      const step = document.querySelector(`[data-obs="${id}"]`);
+      if (step) {
+        const ch = step.querySelector(".trace-chevron");
+        if (ch) ch.textContent = open ? "▾" : "▸";
+      }
+    };
 
     agentTracePanel.style.display = "block";
   }
@@ -437,7 +568,7 @@
   }
 
   /* ── Clarification Card ── */
-  function createClarificationCard(question, sessionId, questionKey) {
+  function createClarificationCard(question, sessionId, questionKey, proposedValue) {
     const card = document.createElement("div");
     card.className = "clarification-card";
     card.id = "clarificationCard";
@@ -487,10 +618,10 @@
         </div>`;
 
       card.querySelector("#clarifyYes").addEventListener("click", () => {
-        answerClarification(sessionId, questionKey, "yes");
+        answerClarification(sessionId, questionKey, "yes", proposedValue);
       });
       card.querySelector("#clarifyNo").addEventListener("click", () => {
-        answerClarification(sessionId, questionKey, "no");
+        answerClarification(sessionId, questionKey, "no", proposedValue);
       });
     }
 
