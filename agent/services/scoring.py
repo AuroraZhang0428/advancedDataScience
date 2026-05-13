@@ -54,6 +54,85 @@ if HAS_LLM:
         )
 
 
+# ---------------------------------------------------------------------------
+# Review-phrase keyword lists for purpose signal extraction
+# ---------------------------------------------------------------------------
+
+_WIFI_POSITIVE = [
+    "fast wifi", "great wifi", "good wifi", "strong wifi", "reliable wifi",
+    "solid wifi", "speedy wifi", "excellent wifi", "wifi worked",
+    "wifi was great", "wifi was fast", "wifi was good", "wifi was excellent",
+    "fast internet", "good internet", "great internet", "reliable internet",
+    "internet was fast", "internet was great",
+]
+_WIFI_NEGATIVE = [
+    "slow wifi", "bad wifi", "no wifi", "poor wifi", "weak wifi",
+    "wifi issues", "wifi problem", "wifi didn't work", "wifi not working",
+    "wifi was slow", "wifi was bad", "wifi was terrible", "wifi was weak",
+    "no internet", "slow internet", "internet issues", "internet problem",
+    "internet was slow", "internet didn't work",
+]
+
+_WORKSPACE_POSITIVE = [
+    "great desk", "good desk", "nice desk", "dedicated desk", "large desk",
+    "great workspace", "good workspace", "nice workspace", "comfortable working",
+    "perfect for work", "great for work", "ideal for work", "work-friendly",
+    "worked from home", "worked remotely", "great for remote",
+]
+_WORKSPACE_NEGATIVE = [
+    "no desk", "no workspace", "nowhere to work", "hard to work",
+    "difficult to work", "not suitable for work", "not good for working",
+    "no place to work",
+]
+
+_QUIET_POSITIVE = [
+    "very quiet", "so quiet", "nice and quiet", "really quiet", "quite quiet",
+    "quiet street", "quiet neighborhood", "quiet area", "quiet building",
+    "surprisingly quiet", "peaceful", "tranquil", "serene", "calm",
+]
+_QUIET_NEGATIVE = [
+    "very noisy", "so noisy", "really noisy", "too noisy",
+    "very loud", "so loud", "too loud", "really loud",
+    "street noise", "loud neighbors", "loud noise", "noise from",
+    "could hear everything", "couldn't sleep", "lot of noise", "lots of noise",
+]
+
+
+def _review_purpose_signals(listing: dict[str, Any]) -> dict[str, float | None]:
+    """Scan guest reviews for wifi, workspace, and quiet quality mentions.
+
+    Returns a float signal in [0, 1] per category (1 = all positive mentions,
+    0 = all negative) or None when no relevant phrases are found.
+    Reviews are the ground truth that overrides listing-level claims.
+    """
+    raw_sample = listing.get("raw", {}).get("sample_reviews", "")
+    records: list[dict] = []
+    try:
+        records = _json.loads(raw_sample) if raw_sample else []
+    except (ValueError, TypeError):
+        pass
+
+    if records and isinstance(records, list):
+        all_text = " ".join(r.get("text", "") for r in records if isinstance(r, dict)).lower()
+    elif raw_sample and isinstance(raw_sample, str):
+        all_text = raw_sample.lower()
+    else:
+        return {"wifi_review": None, "workspace_review": None, "quiet_review": None}
+
+    def _signal(pos_phrases: list[str], neg_phrases: list[str]) -> float | None:
+        pos = sum(1 for p in pos_phrases if p in all_text)
+        neg = sum(1 for p in neg_phrases if p in all_text)
+        if pos == 0 and neg == 0:
+            return None
+        return pos / (pos + neg)  # 1.0 = all positive, 0.0 = all negative
+
+    return {
+        "wifi_review": _signal(_WIFI_POSITIVE, _WIFI_NEGATIVE),
+        "workspace_review": _signal(_WORKSPACE_POSITIVE, _WORKSPACE_NEGATIVE),
+        "quiet_review": _signal(_QUIET_POSITIVE, _QUIET_NEGATIVE),
+    }
+
+
 def _clip(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
     """Clamp a numeric value into the closed interval [lower, upper]."""
 
@@ -292,6 +371,11 @@ def _rerank_with_llm(
             "Return all candidate ids sorted best to worst with fit_score values between 0.0 and 1.0.\n"
             "Also return component_scores for review_rating, amenity_match, purpose_alignment, neighborhood_fit, and price_score.\n"
             "Use the user's priority_weights as guidance for what matters most, but do not compute a rigid weighted average.\n\n"
+            "For purpose_alignment specifically: read the guest reviews carefully for mentions of wifi speed/reliability, "
+            "desk or workspace quality, and noise/quiet levels. Reviews are ground truth — a listing that claims wifi "
+            "but has reviews saying 'wifi was terrible' or 'couldn't work here' should score low on purpose_alignment "
+            "for remote-work queries. Conversely, positive review mentions of fast wifi, great workspace, or peaceful "
+            "quiet should boost the score even if the listing title doesn't emphasize it.\n\n"
             f"Hard constraints:\n{hard_constraints}\n\n"
             f"Soft preferences:\n{soft_preferences}\n\n"
             f"Candidates:\n{candidate_block}\n"
@@ -416,23 +500,49 @@ def compute_amenity_match(listing: dict[str, Any], soft_preferences: dict[str, A
 
 
 def compute_purpose_alignment(listing: dict[str, Any], soft_preferences: dict[str, Any]) -> float | None:
-    """Score fit for higher-level user goals such as remote work."""
+    """Score fit for higher-level user goals such as remote work.
 
+    Review-derived signals are the primary source (70%) when guest reviews
+    mention wifi, workspace, or quiet quality. Structural signals (listing
+    title, amenities, explicit fields) contribute 30% — acting as a baseline
+    when reviews are silent on a topic.
+    """
     if not soft_preferences.get("remote_work") and not soft_preferences.get("quiet_preference"):
         return None
+
+    # Extract review-based signals once; used for both remote_work and quiet branches.
+    review_signals = _review_purpose_signals(listing)
 
     signals: list[float] = []
     if soft_preferences.get("remote_work"):
         wifi = listing.get("wifi")
         workspace = listing.get("workspace")
         purpose_tags = {str(item).lower() for item in listing.get("purpose_tags", [])}
-        signals.append(1.0 if wifi is True else 0.45 if wifi is None else 0.10)
-        signals.append(1.0 if workspace is True else 0.50 if workspace is None else 0.20)
+
+        # Structural baseline (listing title / amenities / explicit column)
+        wifi_struct = 1.0 if wifi is True else 0.45 if wifi is None else 0.10
+        workspace_struct = 1.0 if workspace is True else 0.50 if workspace is None else 0.20
+
+        # Blend with review signal when available (30% structural, 70% review).
+        # Reviews are the primary source — guest experience outweighs listing claims.
+        wifi_review = review_signals.get("wifi_review")
+        workspace_review = review_signals.get("workspace_review")
+        wifi_signal = (0.3 * wifi_struct + 0.7 * wifi_review) if wifi_review is not None else wifi_struct
+        workspace_signal = (0.3 * workspace_struct + 0.7 * workspace_review) if workspace_review is not None else workspace_struct
+
+        signals.append(wifi_signal)
+        signals.append(workspace_signal)
         signals.append(1.0 if "remote_work" in purpose_tags else 0.60)
 
-    quiet_score = _safe_float(listing.get("quiet_score"))
     if soft_preferences.get("quiet_preference"):
-        signals.append(quiet_score if quiet_score is not None else 0.55)
+        quiet_score = _safe_float(listing.get("quiet_score"))
+        quiet_review = review_signals.get("quiet_review")
+        if quiet_score is not None and quiet_review is not None:
+            signals.append(0.3 * quiet_score + 0.7 * quiet_review)
+        elif quiet_review is not None:
+            signals.append(quiet_review)
+        else:
+            signals.append(quiet_score if quiet_score is not None else 0.55)
 
     if not signals:
         return 1.0
